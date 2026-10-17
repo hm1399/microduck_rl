@@ -688,6 +688,70 @@ def fallen_state_penalty(
     return env._fallen_tax_armed.float()
 
 
+def run_sustain_bonus(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    command_name: str = "twist",
+    min_speed: float = 1.5,
+    sustain_s: float = 10.0,
+    base_bonus: float = 10.0,
+    excess_coef: float = 5.0,
+    excess_cap: float = 1.0,
+    up_tilt_deg: float = 25.0,
+    up_z: float = 0.09,
+) -> torch.Tensor:
+    """One-shot endurance bounty for SUSTAINED high-speed running (v5_run).
+
+    Fires once per episode on the first frame where the robot has continuously
+    held |vx| >= min_speed for >= sustain_s while upright (tilt < up_tilt AND
+    z > up_z) AND the command itself asks for at least min_speed. The bonus
+    grows with the average speed held over the sustain window: faster-than-
+    min_speed running earns more ("超 1.5 越多奖越多").
+
+    Anti-farming design:
+      - command AND actual speed must both clear min_speed — no crediting a
+        0.5 m/s shuffle;
+      - one-shot (per episode), not per-step — no hovering at the threshold
+        to farm; after firing, the timer keeps nothing (reward is history);
+      - the upright gate + reset-on-interruption means a single stumble
+        restarts the clock — "maintain 10 s" is literal.
+    Per-step reward is 0.0 except on the firing frame.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    speed = asset.data.root_link_lin_vel_b[:, 0].abs()
+    cmd_ok = command[:, 0].abs() >= min_speed
+
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    quat = asset.data.root_link_quat_w
+    cos_tilt = 1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2)
+    upright = (cos_tilt > math.cos(math.radians(up_tilt_deg))) & (z > up_z)
+
+    cond = (speed >= min_speed) & cmd_ok & upright
+
+    if not hasattr(env, "_run_sustain_timer"):
+        env._run_sustain_timer = torch.zeros(env.num_envs, device=env.device)
+        env._run_sustain_vsum = torch.zeros(env.num_envs, device=env.device)
+        env._run_sustain_fired = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    fresh = env.episode_length_buf <= 1
+    env._run_sustain_timer[fresh] = 0.0
+    env._run_sustain_vsum[fresh] = 0.0
+    env._run_sustain_fired[fresh] = False
+
+    dt = float(env.step_dt)
+    env._run_sustain_timer = torch.where(cond, env._run_sustain_timer + dt, torch.zeros_like(env._run_sustain_timer))
+    env._run_sustain_vsum = torch.where(cond, env._run_sustain_vsum + speed, torch.zeros_like(env._run_sustain_vsum))
+
+    crossing = cond & (~env._run_sustain_fired) & (env._run_sustain_timer >= sustain_s)
+    n_steps = (env._run_sustain_timer / max(dt, 1e-6)).clamp(min=1.0)
+    avg_speed = env._run_sustain_vsum / n_steps
+    bonus = base_bonus + excess_coef * (avg_speed - min_speed).clamp(0.0, excess_cap)
+    env._run_sustain_fired |= crossing
+    return (crossing.to(torch.float32) * bonus).to(torch.float32)
+
+
 def recovery_success(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -4816,6 +4880,51 @@ class VelocityCommandCommandOnlyCfg(UniformVelocityCommandCfg):
         return VelocityCommandCommandOnly(self, env)
 
 
+class RampVelocityCommand(VelocityCommandCommandOnly):
+    """Velocity command scaled by EPISODE PROGRESS: stand → slow walk → full target.
+
+    v5_run (2026-10-17): every episode opens standing, ramps to a slow-walk
+    fraction, then to the full sampled target, so "stand → walk → run" is part
+    of what is trained and high-speed sustained runs have a defined start.
+    The scale is re-applied every step in ``_update_command`` AFTER the base
+    class logic (standing zeroing is re-applied by the base each step, so
+    multiplying here never compounds: standing envs are re-zeroed first, all
+    others hold their resampled value between updates). The RAMPED value is
+    what ``command`` exposes — obs, tracking rewards and BC gates all see the
+    effective command. Training-only: play/export uses the un-ramped command
+    (the runtime sends the real command directly).
+    """
+
+    cfg: "RampVelocityCommandCfg"
+
+    def _ramp_scale(self) -> torch.Tensor:
+        t = self._env.episode_length_buf.to(torch.float32) * self._env.step_dt
+        cfg = self.cfg
+        up_to_slow = ((t - cfg.stand_s) / max(cfg.slow_ramp_end_s - cfg.stand_s, 1e-6)).clamp(0.0, 1.0)
+        slow_to_full = ((t - cfg.slow_ramp_end_s) / max(cfg.full_ramp_end_s - cfg.slow_ramp_end_s, 1e-6)).clamp(0.0, 1.0)
+        return up_to_slow * cfg.slow_frac + slow_to_full * (1.0 - cfg.slow_frac)
+
+    def _update_command(self) -> None:
+        super()._update_command()
+        self.vel_command_b[:, :] *= self._ramp_scale().unsqueeze(1)
+
+
+@_dataclass(kw_only=True)
+class RampVelocityCommandCfg(VelocityCommandCommandOnlyCfg):
+    # Episode-progress ramp knots (seconds from episode start):
+    #   t < stand_s:               command × 0        (standing)
+    #   stand_s → slow_ramp_end_s: 0 → slow_frac      (slow walk)
+    #   slow_ramp_end_s → full_ramp_end_s: slow_frac → 1.0 (to full target)
+    # slow_frac ≈ the v4 walking range (±0.4 m/s) as a fraction of any stage max.
+    stand_s: float = 1.0
+    slow_ramp_end_s: float = 2.0
+    full_ramp_end_s: float = 3.0
+    slow_frac: float = 0.4
+
+    def build(self, env: ManagerBasedRlEnv) -> "RampVelocityCommand":
+        return RampVelocityCommand(self, env)
+
+
 class RelativeHeadingVelocityCommand(VelocityCommandCommandOnly):
     """Velocity command where cmd[2] is the heading error in the robot's body frame.
 
@@ -5930,6 +6039,34 @@ def pose_command_range_curriculum(
     # Return the max abs range as a scalar for wandb visibility.
     max_abs = max((max(abs(lo), abs(hi)) for lo, hi in current), default=0.0)
     return torch.tensor(max_abs)
+
+
+def velocity_x_range_curriculum(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    command_name: str,
+    x_stages: list[dict],
+) -> torch.Tensor:
+    """Ramp a UniformVelocityCommand's lin_vel_x range over training (v5_run).
+
+    x_stages: list of {step: int, lin_vel_x: (lo, hi)}. The first stage applies
+    before its step; latest passed stage wins. Like pose_command_range_curriculum,
+    writes the LIVE CommandManager term cfg (term.cfg.ranges.lin_vel_x) so the
+    next resample picks it up. Returns max |vx| for wandb visibility.
+    """
+    del env_ids
+
+    term = env.command_manager.get_term(command_name)
+    assert term is not None, f"Command term '{command_name}' not found"
+    cfg = term.cfg  # type: ignore[assignment]
+
+    current = tuple(x_stages[0]["lin_vel_x"])
+    for stage in x_stages:
+        if env.common_step_counter >= stage["step"]:
+            current = tuple(stage["lin_vel_x"])
+
+    cfg.ranges.lin_vel_x = current
+    return torch.tensor(max(abs(current[0]), abs(current[1])))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

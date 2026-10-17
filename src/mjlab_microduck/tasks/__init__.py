@@ -35,6 +35,10 @@ from .microduck_velstand_env_cfg import (
     make_microduck_velstand_env_cfg,
     MicroduckVelStandRlCfg,
 )
+from .microduck_run_env_cfg import (
+    make_microduck_run_env_cfg,
+    MicroduckRunRlCfg,
+)
 from .microduck_ground_pick_env_cfg import (
     make_microduck_ground_pick_env_cfg,
     MicroduckGroundPickRlCfg,
@@ -100,6 +104,15 @@ register_mjlab_task(
     env_cfg=make_microduck_velstand_env_cfg(),
     play_env_cfg=make_microduck_velstand_env_cfg(play=True),
     rl_cfg=MicroduckVelStandRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Run — v4 (velstand) + running via staged velocity-range curriculum.
+register_mjlab_task(
+    task_id="Mjlab-Run-Flat-MicroDuck",
+    env_cfg=make_microduck_run_env_cfg(),
+    play_env_cfg=make_microduck_run_env_cfg(play=True),
+    rl_cfg=MicroduckRunRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 

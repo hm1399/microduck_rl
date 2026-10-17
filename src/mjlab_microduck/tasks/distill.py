@@ -79,6 +79,12 @@ def default_bc_cfg() -> dict:
         "anchor_checkpoint_path": None,
         "anchor_coef": 1.0,
         "anchor_tilt_deg": 25.0,
+        # v5_run: anchor only frames whose LINEAR command sits inside the
+        # anchor's own trained range (|v_cmd| <= anchor_max_lin_vel). The v4
+        # anchor never saw |vx| > 0.4 — anchoring run frames would pull the
+        # policy back toward walking. Command obs carry no noise, so the test
+        # is exact. None = gate off (legacy behaviour).
+        "anchor_max_lin_vel": None,
         # Body-control routing (2026-10, branch improve_velstand2). When body_slice is set,
         # STANDING frames (twist obs exactly 0) with a non-zero body command on
         # body_active_axes are taken off the walk anchor (the walk expert ignores body
@@ -272,6 +278,9 @@ class PpoWithExpertBc(PPO):
         gsl = tuple(cfg["gravity_slice"])
         fallen = fallen_mask_from_obs(flat, gsl, cfg["gate_tilt_deg"])
         upright = ~fallen_mask_from_obs(flat, gsl, cfg["anchor_tilt_deg"]) if self.anchor is not None else torch.zeros_like(fallen)
+        if self.anchor is not None and cfg.get("anchor_max_lin_vel") is not None:
+            tw_lin = flat[:, tuple(cfg["twist_slice"])][:, :2].norm(dim=1)
+            upright = upright & (tw_lin <= float(cfg["anchor_max_lin_vel"]))
         body_teach = torch.zeros_like(fallen)
         if cfg.get("body_slice") is not None:
             body_frames, body_teach = body_frame_masks(flat, tuple(cfg["twist_slice"]), tuple(cfg["body_slice"]),
