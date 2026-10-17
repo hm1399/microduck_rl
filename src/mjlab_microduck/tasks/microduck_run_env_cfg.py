@@ -179,9 +179,8 @@ MicroduckRunRlCfg = RslRlOnPolicyRunnerCfg(
         bc_cfg={
             **default_bc_cfg(),
             # Stand expert OFF for v5 (recovery is not being retrained; v4's
-            # recovered behaviour stays via the warm start). The checkpoint
-            # must still load, so it points at v4 — and gate_tilt_deg=180°
-            # makes the fallen mask empty, so the expert is never queried.
+            # recovered behaviour stays via the warm start). With coef=0 the
+            # distillation algorithm skips loading this unused checkpoint.
             "wandb_run_path": V4_WANDB_RUN,
             "checkpoint_name": V4_CHECKPOINT,
             "coef": 0.0,

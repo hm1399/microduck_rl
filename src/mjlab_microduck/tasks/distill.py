@@ -238,9 +238,16 @@ def _resolve_checkpoint(bc_cfg: dict, prefix: str = "") -> Path | None:
     run = bc_cfg.get(f"{prefix}wandb_run_path")
     if not run:
         return None
+    checkpoint_name = bc_cfg.get(f"{prefix}checkpoint_name")
+    if checkpoint_name:
+        run_id = str(run).split("/")[-1]
+        cached_path = EXPERT_CACHE_DIR / "wandb_checkpoints" / run_id / checkpoint_name
+        if cached_path.is_file():
+            print(f"[distill] {prefix or 'expert_'}checkpoint {cached_path} (cached)")
+            return cached_path
     from mjlab.utils.os import get_wandb_checkpoint_path
 
-    path, cached = get_wandb_checkpoint_path(EXPERT_CACHE_DIR, Path(run), bc_cfg.get(f"{prefix}checkpoint_name"))
+    path, cached = get_wandb_checkpoint_path(EXPERT_CACHE_DIR, Path(run), checkpoint_name)
     print(f"[distill] {prefix or 'expert_'}checkpoint {path} ({'cached' if cached else 'downloaded'})")
     return path
 
@@ -252,18 +259,29 @@ class PpoWithExpertBc(PPO):
         self.expert = None
         self.anchor = None
         if bc_cfg:
-            ckpt = torch.load(_resolve_checkpoint(bc_cfg), map_location=self.device, weights_only=False)
-            self.expert = load_expert_from(self.actor, ckpt["actor_state_dict"]).to(self.device)
+            ckpt = None
+            if bc_cfg.get("coef", 0.0) > 0.0:
+                expert_path = _resolve_checkpoint(bc_cfg)
+                if expert_path is None:
+                    raise ValueError("expert BC is enabled but no expert checkpoint is configured")
+                ckpt = torch.load(expert_path, map_location=self.device, weights_only=False)
+                self.expert = load_expert_from(self.actor, ckpt["actor_state_dict"]).to(self.device)
             anchor_path = _resolve_checkpoint(bc_cfg, "anchor_") if bc_cfg.get("anchor_coef", 0.0) > 0 else None
             if anchor_path is not None:
                 ack = torch.load(anchor_path, map_location=self.device, weights_only=False)
                 self.anchor = load_expert_from(self.actor, ack["actor_state_dict"]).to(self.device)
+            if self.expert is None and self.anchor is None:
+                self.bc_cfg = None
+                return
             # Own optimizer: PPO's adaptive-KL schedule and shared Adam moments
             # would otherwise throttle/mix the BC step (first path check: 4 BC
             # steps through the PPO optimizer lost to 20 PPO steps per iteration).
             self.bc_optimizer = torch.optim.Adam(self.actor.parameters(), lr=bc_cfg["learning_rate"])
+            expert_iter = f" (iter {ckpt.get('iter')})" if ckpt is not None else ""
             print(
-                f"[distill] expert BC ON: stand expert (iter {ckpt.get('iter')}) on tilt>{bc_cfg['gate_tilt_deg']}° coef={bc_cfg['coef']}; "
+                f"[distill] expert BC {'ON' if self.expert is not None else 'OFF'}"
+                f"{expert_iter}; "
+                f"stand gate tilt>{bc_cfg['gate_tilt_deg']}° coef={bc_cfg['coef']}; "
                 f"walk anchor {'ON on tilt<' + str(bc_cfg['anchor_tilt_deg']) + '° coef=' + str(bc_cfg['anchor_coef']) if self.anchor is not None else 'OFF'}; "
                 f"lr={bc_cfg['learning_rate']} epochs={bc_cfg['epochs']} mini_batches={bc_cfg['mini_batches']} min_mb={bc_cfg.get('min_mini_batch', 1)}"
             )
@@ -276,13 +294,17 @@ class PpoWithExpertBc(PPO):
         groups = list(self.actor.obs_groups)
         flat = torch.cat([obs_td[g] for g in groups], dim=-1)
         gsl = tuple(cfg["gravity_slice"])
-        fallen = fallen_mask_from_obs(flat, gsl, cfg["gate_tilt_deg"])
+        fallen = (
+            fallen_mask_from_obs(flat, gsl, cfg["gate_tilt_deg"])
+            if self.expert is not None
+            else torch.zeros(flat.shape[0], dtype=torch.bool, device=flat.device)
+        )
         upright = ~fallen_mask_from_obs(flat, gsl, cfg["anchor_tilt_deg"]) if self.anchor is not None else torch.zeros_like(fallen)
         if self.anchor is not None and cfg.get("anchor_max_lin_vel") is not None:
             tw_lin = flat[:, tuple(cfg["twist_slice"])][:, :2].norm(dim=1)
             upright = upright & (tw_lin <= float(cfg["anchor_max_lin_vel"]))
         body_teach = torch.zeros_like(fallen)
-        if cfg.get("body_slice") is not None:
+        if self.expert is not None and cfg.get("body_slice") is not None:
             body_frames, body_teach = body_frame_masks(flat, tuple(cfg["twist_slice"]), tuple(cfg["body_slice"]),
                                                        tuple(cfg["body_active_axes"]), tuple(cfg["body_no_teacher_axes"]))
             upright = upright & ~body_frames
@@ -294,7 +316,11 @@ class PpoWithExpertBc(PPO):
         stats = {"expert_bc_fallen_frac": fallen.float().mean().item(), "expert_bc_anchor_frac": upright.float().mean().item(),
                  "expert_bc_body_teach_frac": body_teach.float().mean().item(),
                  "expert_bc_turn_free_frac": turn_free.float().mean().item()}
-        tilted = fallen_mask_from_obs(flat, gsl, cfg.get("expert_mask_tilt_deg", 75.0)) & fallen  # expert_mask_cols rows
+        tilted = (
+            fallen_mask_from_obs(flat, gsl, cfg.get("expert_mask_tilt_deg", 75.0)) & fallen
+            if self.expert is not None
+            else torch.zeros_like(fallen)
+        )  # expert_mask_cols rows
         fallen = fallen | body_teach
         if fallen.sum().item() < cfg["min_samples"]:
             fallen = torch.zeros_like(fallen)  # too few fallen frames: anchor-only pass (or nothing)
@@ -344,6 +370,6 @@ class PpoWithExpertBc(PPO):
 
     def update(self) -> dict[str, float]:
         loss_dict = super().update()
-        if self.expert is not None:
+        if self.expert is not None or self.anchor is not None:
             loss_dict.update(self._bc_update())
         return loss_dict

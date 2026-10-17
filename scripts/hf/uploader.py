@@ -40,6 +40,7 @@ def main() -> int:
             files += [p for p in root.glob("**/params/*.json")]
 
             to_upload: list[CommitOperationAdd] = []
+            upload_paths: list[tuple[Path, float]] = []
             for f in files:
                 try:
                     mtime = f.stat().st_mtime
@@ -52,7 +53,7 @@ def main() -> int:
                 to_upload.append(
                     CommitOperationAdd(path_in_repo=str(rel), path_or_fileobj=str(f))
                 )
-                sent[f] = mtime
+                upload_paths.append((f, mtime))
 
             if to_upload:
                 msg = f"upload {len(to_upload)} file(s)"
@@ -62,9 +63,13 @@ def main() -> int:
                     operations=to_upload,
                     commit_message=msg,
                 )
+                for f, mtime in upload_paths:
+                    sent[f] = mtime
                 print(f"[uploader] pushed {len(to_upload)} file(s)", flush=True)
         except Exception as e:
             print(f"[uploader] error: {e}", flush=True)
+            if one_shot:
+                return 1
 
         if one_shot:
             return 0

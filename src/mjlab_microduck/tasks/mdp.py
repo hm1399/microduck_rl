@@ -4886,16 +4886,26 @@ class RampVelocityCommand(VelocityCommandCommandOnly):
     v5_run (2026-10-17): every episode opens standing, ramps to a slow-walk
     fraction, then to the full sampled target, so "stand → walk → run" is part
     of what is trained and high-speed sustained runs have a defined start.
-    The scale is re-applied every step in ``_update_command`` AFTER the base
-    class logic (standing zeroing is re-applied by the base each step, so
-    multiplying here never compounds: standing envs are re-zeroed first, all
-    others hold their resampled value between updates). The RAMPED value is
-    what ``command`` exposes — obs, tracking rewards and BC gates all see the
-    effective command. Training-only: play/export uses the un-ramped command
-    (the runtime sends the real command directly).
+    The scale is re-applied every step in ``_update_command`` from a saved copy
+    of the last sampled command. The base class keeps sampled commands in place
+    between resamples, so scaling ``vel_command_b`` in place would compound and
+    collapse the command toward zero. The RAMPED value is what ``command``
+    exposes — obs, tracking rewards and BC gates all see the effective command.
+    Training-only: play/export uses the un-ramped command (the runtime sends the
+    real command directly).
     """
 
     cfg: "RampVelocityCommandCfg"
+
+    def __init__(self, cfg: "RampVelocityCommandCfg", env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        self._raw_vel_command_b = torch.zeros_like(self.vel_command_b)
+        self._raw_vel_command_w = torch.zeros_like(self.vel_command_w)
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        super()._resample_command(env_ids)
+        self._raw_vel_command_b[env_ids] = self.vel_command_b[env_ids]
+        self._raw_vel_command_w[env_ids] = self.vel_command_w[env_ids]
 
     def _ramp_scale(self) -> torch.Tensor:
         t = self._env.episode_length_buf.to(torch.float32) * self._env.step_dt
@@ -4905,6 +4915,8 @@ class RampVelocityCommand(VelocityCommandCommandOnly):
         return up_to_slow * cfg.slow_frac + slow_to_full * (1.0 - cfg.slow_frac)
 
     def _update_command(self) -> None:
+        self.vel_command_b[:] = self._raw_vel_command_b
+        self.vel_command_w[:] = self._raw_vel_command_w
         super()._update_command()
         self.vel_command_b[:, :] *= self._ramp_scale().unsqueeze(1)
 
