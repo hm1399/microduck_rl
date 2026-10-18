@@ -9,6 +9,7 @@ import os
 import pickle
 import queue
 import select
+import socket
 import sys
 import termios
 import threading
@@ -207,6 +208,68 @@ class TerminalInput:
                 keys.append(self._queue.get_nowait())
             except queue.Empty:
                 return keys
+
+
+class RemoteControlInput:
+    """Receive velocity and simulator commands from a local UDP controller."""
+
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        self._queue = queue.Queue()
+        self._stop = threading.Event()
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._socket.bind((host, port))
+        self._socket.settimeout(0.1)
+        self._thread = threading.Thread(target=self._reader, daemon=True)
+        print(f"Remote joystick control listening on udp://{host}:{port}")
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def close(self):
+        self._stop.set()
+        self._thread.join(timeout=0.5)
+        self._socket.close()
+
+    def _reader(self):
+        while not self._stop.is_set():
+            try:
+                payload, _address = self._socket.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+
+            try:
+                message = json.loads(payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(message, dict):
+                continue
+
+            command_type = message.get("type")
+            if command_type == "velocity":
+                try:
+                    velocity = tuple(float(message.get(axis, 0.0)) for axis in ("x", "y", "yaw"))
+                except (TypeError, ValueError):
+                    continue
+                if not all(np.isfinite(value) for value in velocity):
+                    continue
+                self._queue.put((command_type, velocity))
+            elif command_type in {"reset", "quit"}:
+                self._queue.put((command_type, None))
+
+    def get_commands(self):
+        """Drain and return pending remote commands."""
+        commands = []
+        while True:
+            try:
+                commands.append(self._queue.get_nowait())
+            except queue.Empty:
+                return commands
 
 
 class PolicyInference:
@@ -1185,6 +1248,10 @@ def main():
     parser.add_argument("--lin-vel-x", type=float, default=0.0, help="Initial linear velocity X command (m/s)")
     parser.add_argument("--lin-vel-y", type=float, default=0.0, help="Initial linear velocity Y command (m/s)")
     parser.add_argument("--ang-vel-z", type=float, default=0.0, help="Initial angular velocity Z command (rad/s)")
+    parser.add_argument("--control-host", type=str, default="127.0.0.1",
+                        help="Host for the virtual joystick UDP control server")
+    parser.add_argument("--control-port", type=int, default=0,
+                        help="Enable virtual joystick UDP control on this port (0 disables it)")
     parser.add_argument("--action-scale", type=float, default=1.0, help="Action scale (default: 1.0)")
     parser.add_argument("--raw-accelerometer", action="store_true", help="Use raw accelerometer instead of projected gravity")
     parser.add_argument("--delay", type=int, nargs='*', default=None, help="Enable actuator delay: --delay MIN MAX or --delay LAG")
@@ -1386,6 +1453,46 @@ def main():
     policy.set_position_targets(policy.default_pose)
     mujoco.mj_forward(model, data)
 
+    def reset_simulation():
+        """Return the robot, commands, and policy state to the start pose."""
+        mujoco.mj_resetData(model, data)
+        data.qpos[qpos_adr:qpos_adr + 3] = [0.0, 0.0, 0.1385 if args.roller else 0.125]
+        data.qpos[qpos_adr + 3:qpos_adr + 7] = [1, 0, 0, 0]
+        for i, qpos_idx in enumerate(policy.joint_qpos_indices):
+            data.qpos[qpos_idx] = policy.default_pose[i]
+
+        policy.vel_cmd[:] = 0.0
+        policy.head_offset[:] = 0.0
+        policy.body_cmd[:] = 0.0
+        policy.last_action[:] = 0.0
+        if policy.use_delay:
+            for buffered_action in policy.action_buffer:
+                buffered_action[:] = 0.0
+            policy.buffer_index = 0
+
+        policy.ground_pick_mode = False
+        policy.ground_pick_phase = 0.0
+        policy.behavior_mode = None
+        policy.behavior_time_left = 0.0
+        policy.sit_mode = False
+        policy.slope_mode = False
+        if policy.walking_session:
+            policy.current_policy = "walking"
+            policy.ort_session = policy.walking_session
+        elif policy.standing_session:
+            policy.current_policy = "standing"
+            policy.ort_session = policy.standing_session
+        else:
+            policy.current_policy = "sit"
+            policy.ort_session = policy.sit_session
+        policy._update_command()
+
+        if bam_ctrl is not None:
+            bam_ctrl.reset(data.qpos)
+        policy.set_position_targets(policy.default_pose)
+        mujoco.mj_forward(model, data)
+        print("Simulation reset to the default standing pose")
+
     # Verify observation size
     test_obs = policy.get_observations()
     cmd_dim = 13 if policy.new_cmd_obs else 3
@@ -1481,6 +1588,40 @@ def main():
         data.qvel[_trunk_qvel_adr + 1] = vy
         print(f"PUSH applied: v=[{vx:.2f}, {vy:.2f}, 0] m/s (angle={np.degrees(angle):.0f}°)")
 
+    remote_input = None
+    if args.control_port:
+        remote_input = RemoteControlInput(args.control_host, args.control_port).start()
+    remote_last_command_at = None
+    remote_zero_sent = False
+
+    def handle_remote(command_type, payload):
+        nonlocal quit_requested, remote_last_command_at, remote_zero_sent
+        if command_type == "velocity":
+            lin_vel_x, lin_vel_y, ang_vel_z = payload
+            policy.set_vel_cmd(
+                np.clip(lin_vel_x, policy.vel_min_x, policy.vel_max_x),
+                np.clip(lin_vel_y, policy.vel_min_y, policy.vel_max_y),
+                np.clip(ang_vel_z, -policy.vel_max_ang, policy.vel_max_ang),
+            )
+            remote_last_command_at = time.monotonic()
+            remote_zero_sent = False
+        elif command_type == "reset":
+            reset_simulation()
+            remote_last_command_at = time.monotonic()
+            remote_zero_sent = False
+        elif command_type == "quit":
+            quit_requested = True
+
+    def stop_remote_command_after_timeout():
+        """Stop if the joystick app disappears without sending a release packet."""
+        nonlocal remote_zero_sent
+        if remote_input is None or remote_last_command_at is None or remote_zero_sent:
+            return
+        if time.monotonic() - remote_last_command_at > 0.4:
+            if np.any(policy.vel_cmd):
+                policy.set_vel_cmd(0.0, 0.0, 0.0)
+            remote_zero_sent = True
+
     # Keys come from the TERMINAL (raw stdin, see TerminalInput) — not from the
     # MuJoCo viewer window, whose keypresses also fire built-in visualization
     # shortcuts. `key` is a symbolic name: "up"/"down"/"left"/"right", " ", or
@@ -1556,7 +1697,10 @@ def main():
             elif key == "l":
                 policy.trigger_behavior("kick_right")
             elif key == "r":
-                policy.trigger_behavior("roulade")
+                if policy.behavior_sessions.get("roulade") is not None:
+                    policy.trigger_behavior("roulade")
+                else:
+                    reset_simulation()
             elif key == "q":
                 quit_requested = True
                 print("Quit requested")
@@ -1623,7 +1767,7 @@ def main():
     print("  Y:                toggle sit (with --sit/--sitstand) or slope mode (with --slope)")
     print("  K:                kick with LEFT foot (requires --kick-left)")
     print("  L:                kick with RIGHT foot (requires --kick-right)")
-    print("  R:                roulade / forward roll (requires --roulade)")
+    print("  R:                reset simulation (or roulade when --roulade is loaded)")
     print(f"  P:                random push (trunk vel = {PUSH_MAX:.1f} m/s in random direction)")
     print("  Q:                quit")
     print("  [ Body pose mode — press B to toggle ]")
@@ -1639,6 +1783,8 @@ def main():
     print("  LEFT/RIGHT arrow: head_yaw ±step")
     print("  A / E:            head_roll ±step")
     print("  SPACE:            reset head offset to zero")
+    if remote_input is not None:
+        print(f"  Virtual joystick: udp://{args.control_host}:{args.control_port}")
 
     with TerminalInput() as term, \
          mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False) as viewer:
@@ -1664,6 +1810,10 @@ def main():
 
                 for key in term.get_keys():
                     handle_key(key)
+                if remote_input is not None:
+                    for command_type, payload in remote_input.get_commands():
+                        handle_remote(command_type, payload)
+                    stop_remote_command_after_timeout()
 
                 if not policy_enabled and policy_enable_time is not None:
                     if step_start >= policy_enable_time:
@@ -1791,6 +1941,9 @@ def main():
 
         except KeyboardInterrupt:
             print("\n\nKeyboardInterrupt received (Ctrl+C). Saving data...")
+
+    if remote_input is not None:
+        remote_input.close()
 
     print("\nInference stopped.")
     if odom_compare is not None:
