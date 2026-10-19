@@ -1117,6 +1117,111 @@ def make_microduck_standup_env_cfg(
     return cfg
 
 
+def make_microduck_v6_standup_env_cfg(
+    play: bool = False,
+    rough: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Create v6 stand-up training with progressively broader reset states."""
+    cfg = make_microduck_standup_env_cfg(play=play, rough=rough)
+
+    cfg.events["set_ground_state"] = EventTermCfg(
+        func=microduck_mdp.set_random_v6_standup_state,
+        mode="reset",
+        params={
+            "standing_prob": 0.35,
+            "sitting_prob": 0.35,
+            "prone_prob": 0.30,
+            "face_down_prob": 0.65,
+            "side_prob": 0.05,
+            "so3_prob": 0.0,
+            "joint_random_prob": 0.0,
+            "joint_range_frac": 0.8,
+            "prone_z_min": 0.06,
+            "prone_z_max": 0.10,
+            "joint_random_extra_z": 0.04,
+            "so3_extra_z": 0.04,
+            "sitting_z_min": 0.05,
+            "sitting_z_max": 0.09,
+            "standing_z_min": 0.11,
+            "standing_z_max": 0.12,
+            "sitting_joint_overrides": SITTING_JOINT_OVERRIDES,
+            "sitting_joint_noise_std": 0.08,
+            "standing_joint_noise_std": 0.05,
+            "sitting_tilt_max": math.radians(5),
+        },
+    )
+
+    cfg.curriculum["ground_state_mix"] = CurriculumTermCfg(
+        func=microduck_mdp.event_param_curriculum,
+        params={
+            "event_name": "set_ground_state",
+            "param_stages": [
+                {
+                    "step": 0,
+                    "params": {
+                        "standing_prob": 0.35,
+                        "sitting_prob": 0.35,
+                        "prone_prob": 0.30,
+                        "face_down_prob": 0.65,
+                        "side_prob": 0.05,
+                        "so3_prob": 0.0,
+                        "joint_random_prob": 0.0,
+                        "sitting_joint_noise_std": 0.08,
+                        "standing_joint_noise_std": 0.05,
+                        "sitting_tilt_max": math.radians(5),
+                    },
+                },
+                {
+                    "step": 600 * 24,
+                    "params": {
+                        "standing_prob": 0.25,
+                        "sitting_prob": 0.30,
+                        "prone_prob": 0.45,
+                        "face_down_prob": 0.55,
+                        "side_prob": 0.10,
+                        "so3_prob": 0.05,
+                        "joint_random_prob": 0.20,
+                        "sitting_joint_noise_std": 0.12,
+                        "standing_joint_noise_std": 0.08,
+                        "sitting_tilt_max": math.radians(10),
+                    },
+                },
+                {
+                    "step": 1500 * 24,
+                    "params": {
+                        "standing_prob": 0.20,
+                        "sitting_prob": 0.25,
+                        "prone_prob": 0.55,
+                        "face_down_prob": 0.50,
+                        "side_prob": 0.20,
+                        "so3_prob": 0.15,
+                        "joint_random_prob": 0.45,
+                        "sitting_joint_noise_std": 0.16,
+                        "standing_joint_noise_std": 0.12,
+                        "sitting_tilt_max": math.radians(12),
+                    },
+                },
+                {
+                    "step": 3000 * 24,
+                    "params": {
+                        "standing_prob": 0.15,
+                        "sitting_prob": 0.20,
+                        "prone_prob": 0.65,
+                        "face_down_prob": 0.45,
+                        "side_prob": 0.30,
+                        "so3_prob": 0.30,
+                        "joint_random_prob": 0.70,
+                        "sitting_joint_noise_std": 0.20,
+                        "standing_joint_noise_std": 0.15,
+                        "sitting_tilt_max": math.radians(15),
+                    },
+                },
+            ],
+        },
+    )
+    return cfg
+
+
 # ── RL runner config ──────────────────────────────────────────────────────────
 
 MicroduckStandUpRlCfg = RslRlOnPolicyRunnerCfg(
@@ -1157,3 +1262,7 @@ MicroduckStandUpRlCfg = RslRlOnPolicyRunnerCfg(
     num_steps_per_env=24,
     max_iterations=15_000,
 )
+
+MicroduckV6StandUpRlCfg = deepcopy(MicroduckStandUpRlCfg)
+MicroduckV6StandUpRlCfg.experiment_name = "microduck_v6_standup"
+MicroduckV6StandUpRlCfg.run_name = "microduck_v6_standup"

@@ -29,7 +29,9 @@ from .microduck_velocity_env_cfg import (
 )
 from .microduck_standup_env_cfg import (
     make_microduck_standup_env_cfg,
+    make_microduck_v6_standup_env_cfg,
     MicroduckStandUpRlCfg,
+    MicroduckV6StandUpRlCfg,
 )
 from .microduck_velstand_env_cfg import (
     make_microduck_velstand_env_cfg,
@@ -138,6 +140,23 @@ register_mjlab_task(
     env_cfg=make_microduck_standup_env_cfg(rough=True),
     play_env_cfg=make_microduck_standup_env_cfg(play=True, rough=True),
     rl_cfg=MicroduckStandUpRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# v6 StandUp — broad randomized reset states, widened by curriculum.
+register_mjlab_task(
+    task_id="Mjlab-v6-StandUp-Flat-MicroDuck",
+    env_cfg=make_microduck_v6_standup_env_cfg(),
+    play_env_cfg=make_microduck_v6_standup_env_cfg(play=True),
+    rl_cfg=MicroduckV6StandUpRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-v6-StandUp-Rough-MicroDuck",
+    env_cfg=make_microduck_v6_standup_env_cfg(rough=True),
+    play_env_cfg=make_microduck_v6_standup_env_cfg(play=True, rough=True),
+    rl_cfg=MicroduckV6StandUpRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
@@ -273,6 +292,8 @@ _BACKLASH_TASKS = (
     ("Mjlab-VelStand-Rough-Backlash-MicroDuck", make_microduck_velstand_env_cfg, {"rough": True}, MicroduckVelStandRlCfg, _BL_ALLCOLLISIONS),
     ("Mjlab-StandUp-Flat-Backlash-MicroDuck", make_microduck_standup_env_cfg, {}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-StandUp-Rough-Backlash-MicroDuck", make_microduck_standup_env_cfg, {"rough": True}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
+    ("Mjlab-v6-StandUp-Flat-Backlash-MicroDuck", make_microduck_v6_standup_env_cfg, {}, MicroduckV6StandUpRlCfg, _BL_GROUNDCONTACT),
+    ("Mjlab-v6-StandUp-Rough-Backlash-MicroDuck", make_microduck_v6_standup_env_cfg, {"rough": True}, MicroduckV6StandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-SitStand-Flat-Backlash-MicroDuck", make_microduck_sitstand_env_cfg, {}, MicroduckSitStandRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-SitStand-Rough-Backlash-MicroDuck", make_microduck_sitstand_env_cfg, {"rough": True}, MicroduckSitStandRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-GroundPick-Flat-Backlash-MicroDuck", make_microduck_ground_pick_env_cfg, {}, MicroduckGroundPickRlCfg, _BL_GROUNDCONTACT),

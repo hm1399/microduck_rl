@@ -4392,6 +4392,7 @@ def set_random_ground_state(
     sitting_joint_noise_std: float = 0.0,
     sitting_tilt_max: float = 0.0,
     face_up_roll_max: float = 0.0,
+    standing_joint_noise_std: float = 0.0,
 ):
     """Reset to a random ground state: face-down, face-up, sitting, or standing.
 
@@ -4531,7 +4532,132 @@ def set_random_ground_state(
             n_sit = len(sit_env_ids)
             cols = torch.tensor([7 + j for j in servo_ids], device=env.device, dtype=torch.long)
             noise = torch.randn(n_sit, len(cols), device=env.device) * sitting_joint_noise_std
-            env.sim.data.qpos[sit_env_ids.unsqueeze(1).long(), cols.unsqueeze(0)] += noise
+            current = env.sim.data.qpos[sit_env_ids][:, cols] + noise
+            limits = asset.data.joint_pos_limits[sit_env_ids][:, servo_ids]
+            current = torch.clamp(current, limits[..., 0], limits[..., 1])
+            env.sim.data.qpos[sit_env_ids.unsqueeze(1).long(), cols.unsqueeze(0)] = current
+
+    if standing_joint_noise_std > 0.0:
+        stand_env_ids = env_ids[is_stand]
+        if len(stand_env_ids) > 0:
+            asset = env.scene[asset_cfg.name]
+            servo_ids = _servo_joint_ids(env, asset)
+            n_stand = len(stand_env_ids)
+            cols = torch.tensor([7 + j for j in servo_ids], device=env.device, dtype=torch.long)
+            noise = torch.randn(n_stand, len(cols), device=env.device) * standing_joint_noise_std
+            current = env.sim.data.qpos[stand_env_ids][:, cols] + noise
+            limits = asset.data.joint_pos_limits[stand_env_ids][:, servo_ids]
+            current = torch.clamp(current, limits[..., 0], limits[..., 1])
+            env.sim.data.qpos[stand_env_ids.unsqueeze(1).long(), cols.unsqueeze(0)] = current
+
+
+def set_random_v6_standup_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    standing_prob: float = 0.2,
+    sitting_prob: float = 0.2,
+    prone_prob: float = 0.6,
+    face_down_prob: float = 0.5,
+    side_prob: float = 0.0,
+    so3_prob: float = 0.0,
+    joint_random_prob: float = 0.0,
+    joint_range_frac: float = 0.8,
+    prone_z_min: float = 0.06,
+    prone_z_max: float = 0.10,
+    joint_random_extra_z: float = 0.04,
+    so3_extra_z: float = 0.04,
+    sitting_z_min: float = 0.05,
+    sitting_z_max: float = 0.09,
+    standing_z_min: float = 0.11,
+    standing_z_max: float = 0.12,
+    sitting_joint_overrides: Optional[dict] = None,
+    sitting_joint_noise_std: float = 0.12,
+    standing_joint_noise_std: float = 0.08,
+    sitting_tilt_max: float = 0.0,
+):
+    """Reset v6 into varied upright, sitting, and fallen states.
+
+    The prone slice includes face-down, face-up, side, uniformly random SO(3),
+    and random-servo starts. Randomness is supplied by curriculum so the policy
+    first learns the recovery direction before it has to handle arbitrary poses.
+    """
+    if env_ids is None or len(env_ids) == 0:
+        return
+
+    env_ids = env_ids.to(env.device, dtype=torch.int)
+    total = standing_prob + sitting_prob + prone_prob
+    if total <= 0.0:
+        return
+
+    u = torch.rand(len(env_ids), device=env.device)
+    stand_cut = standing_prob / total
+    sit_cut = (standing_prob + sitting_prob) / total
+    is_stand = u < stand_cut
+    is_sit = (u >= stand_cut) & (u < sit_cut)
+    prone_ids = env_ids[~(is_stand | is_sit)]
+
+    if is_stand.any():
+        set_random_ground_state(
+            env,
+            env_ids[is_stand],
+            asset_cfg=asset_cfg,
+            face_down_prob=0.0,
+            face_up_prob=0.0,
+            sitting_prob=0.0,
+            standing_prob=1.0,
+            standing_z_min=standing_z_min,
+            standing_z_max=standing_z_max,
+            standing_joint_noise_std=standing_joint_noise_std,
+            sitting_tilt_max=sitting_tilt_max,
+        )
+
+    if is_sit.any():
+        set_random_ground_state(
+            env,
+            env_ids[is_sit],
+            asset_cfg=asset_cfg,
+            face_down_prob=0.0,
+            face_up_prob=0.0,
+            sitting_prob=1.0,
+            standing_prob=0.0,
+            sitting_z_min=sitting_z_min,
+            sitting_z_max=sitting_z_max,
+            sitting_joint_overrides=sitting_joint_overrides,
+            sitting_joint_noise_std=sitting_joint_noise_std,
+            sitting_tilt_max=sitting_tilt_max,
+        )
+
+    if len(prone_ids) == 0:
+        return
+
+    set_random_prone_orientation(
+        env,
+        prone_ids,
+        asset_cfg=asset_cfg,
+        face_down_prob=face_down_prob,
+        side_prob=side_prob,
+    )
+
+    z = torch.rand(len(prone_ids), device=env.device) * (prone_z_max - prone_z_min) + prone_z_min
+    env.sim.data.qpos[prone_ids, 2] = z + _env_origin_z(env, prone_ids)
+
+    so3_mask = torch.rand(len(prone_ids), device=env.device) < so3_prob
+    if so3_mask.any():
+        so3_ids = prone_ids[so3_mask]
+        env.sim.data.qpos[so3_ids, 3:7] = _uniform_random_quat(len(so3_ids), env.device)
+        env.sim.data.qpos[so3_ids, 2] += so3_extra_z
+
+    joint_mask = (torch.rand(len(prone_ids), device=env.device) < joint_random_prob) | so3_mask
+    if joint_mask.any():
+        joint_ids = prone_ids[joint_mask]
+        randomize_servo_joints_uniform(
+            env,
+            joint_ids,
+            asset_cfg=asset_cfg,
+            range_frac=joint_range_frac,
+        )
+        env.sim.data.qpos[joint_ids, 2] += joint_random_extra_z
 
 
 # Deep-crouch anchor pose (velstand run-5): the "stuck" mid-recovery basin —
