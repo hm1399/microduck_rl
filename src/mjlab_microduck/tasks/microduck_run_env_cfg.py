@@ -7,10 +7,11 @@ in the mujoco workspace (not in this repo).
 WHAT THIS ADDS ON TOP OF VELSTAND (everything else is inherited unchanged,
 so the v4 checkpoint loads and the 61D obs contract holds):
 
-  1. STAGED VELOCITY-RANGE CURRICULUM — lin_vel_x widens ±0.8 → ±1.2 → ±1.6
-     → ±2.0 m/s at 600-iter steps (velocity_x_range_curriculum, mdp.py).
-     Iter 1200 (±1.6) is the DECISION POINT: export + eyeball the gait before
-     committing to ±2.0. lin_vel_y / ang_vel_z stay at v4 ranges.
+  1. STAGED VELOCITY-RANGE CURRICULUM — lin_vel_x widens ±0.4 → ±0.8 → ±1.2
+     → ±1.6 m/s at 800-iter steps (velocity_x_range_curriculum, mdp.py).
+     The initial two stages are deliberately conservative: a speed stage must
+     pass the stand/walk checks before the next one is enabled manually.
+     lin_vel_y / ang_vel_z stay at v4 ranges.
   2. EPISODE-OPEN RAMP (RampVelocityCommand, mdp.py) — every episode commands
      0 for the first second (stand), ramps to slow_frac (≈ the v4 walk range)
      by 2 s, then to the full target by 3 s. "Stand → walk → run" is part of
@@ -21,18 +22,16 @@ so the v4 checkpoint loads and the 61D obs contract holds):
      |vx| ≥ 1.5 for 10 continuous seconds while upright AND commanded ≥ 1.5.
      Anti-farming: command AND actual speed gated, one-shot, stumble resets
      the clock.
-  4. V4 ANCHOR BC — PpoWithExpertBc with the stand expert disabled (gate
-     180° never fires; v5 does not train fall recovery) and the WALK ANCHOR
-     set to the v4 checkpoint, coef 0.5, gated to frames whose commanded
-     |v_xy| ≤ 0.4 (the anchor's own trained range — anchoring run frames
-     would drag the policy back toward walking). Standing / slow-walk /
-     turn-in-place frames are pinned to v4; run frames are PPO's alone.
+  4. V4 RECOVERY + ANCHOR BC — the v4 checkpoint is used as a fallen-state
+     teacher and as a low-speed anchor. The recovery teacher is joint-masked
+     above 75° so random fallen joint poses cannot turn into a copied freeze;
+     the walk anchor is limited to |v_xy| ≤ 0.4 so run frames remain PPO's.
 
-CURRICULA: v4 already completed every velstand phase, so on top of the
-inherited velocity-collapse (velstand's WARM_START) ALL velstand curricula
-are collapsed to final too — recovery economics, prone slice (45%), topple
-pushes and protective costs stay exactly as v4 ended them. The only ramp
-left is the velocity-range one above.
+CURRICULA: the velocity factory still collapses the inherited walk recipe,
+because the warm-start checkpoint already knows that skill. The v5 wrapper
+does NOT collapse velstand's own recovery curricula: fall termination,
+standing samples, prone resets, topple pushes, and recovery economics must
+remain staged or the run starts in the final hard regime and loses standing.
 
 WARM START (launch, mirrors v4's mechanism):
     MICRODUCK_WARM_START=1 uv run train Mjlab-Run-Flat-MicroDuck \
@@ -42,6 +41,8 @@ WARM START (launch, mirrors v4's mechanism):
         --wandb-checkpoint-name model_1999.pt
 (The BC anchor resolves the same checkpoint from the same wandb run.)
 """
+
+import math
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers import (
@@ -58,7 +59,6 @@ from mjlab.rl import (
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.microduck_velstand_env_cfg import (
     NUM_STEPS_PER_ENV,
-    _collapse_curricula_to_final,
     make_microduck_velstand_env_cfg,
 )
 from mjlab_microduck.tasks.distill import PpoWithExpertBcCfg, default_bc_cfg
@@ -67,9 +67,35 @@ from mjlab_microduck.tasks.distill import PpoWithExpertBcCfg, default_bc_cfg
 V4_WANDB_RUN = "mandy0917-city-university-of-hong-kong/mjlab_microduck/181y2lna"
 V4_CHECKPOINT = "model_1999.pt"
 
-# ── (1) staged velocity range: iter 1200 = decision point ──────────────────
-VEL_X_STAGES_ITERS = (0, 600, 1200, 1800)
-VEL_X_STAGES_ABS = (0.8, 1.2, 1.6, 2.0)
+# ── v5 safety curriculum ────────────────────────────────────────────────────
+# The velocity factory collapses its inherited walk curriculum before adding
+# velstand's own phases. These v5 stages restore only the command/reset pieces
+# that must not start at their final difficulty.
+STANDING_STAGES = (
+    (0, 0.05),
+    (600, 0.10),
+    (1400, 0.15),
+    (2200, 0.25),
+)
+FELL_OVER_DISABLE_ITER = 800
+PRONE_STAGES = (
+    (0, 0.00, 1.00, 0.50, 0.00),
+    (600, 0.00, 1.00, 0.50, 0.10),
+    (1200, 0.15, 0.80, 0.50, 0.15),
+    (2000, 0.25, 0.65, 0.50, 0.15),
+    (2600, 0.30, 0.50, 0.50, 0.15),
+)
+TOPPLE_PUSH_STAGES = (
+    (0, (-0.30, 0.30)),
+    (800, (-0.50, 0.50)),
+    (1600, (-0.75, 0.75)),
+    (2400, (-1.00, 1.00)),
+)
+
+# Low-speed validation is the gate for future run stages. Do not silently
+# resume the old ±2.0 m/s schedule before a checkpoint passes that validation.
+VEL_X_STAGES_ITERS = (0, 800, 1600, 2400)
+VEL_X_STAGES_ABS = (0.4, 0.8, 1.2, 1.6)
 
 # ── (2) episode-open ramp ──────────────────────────────────────────────────
 RAMP_STAND_S = 1.0
@@ -98,11 +124,67 @@ def make_microduck_run_env_cfg(play: bool = False, rough: bool = False) -> Manag
     cfg = make_microduck_velstand_env_cfg(play=play, rough=rough)
 
     if not play:
-        # v4 finished every velstand phase: pin prone slice (45%), recovery
-        # economics, topple pushes and protective costs at their final state.
-        # (The inherited velocity curricula were already collapsed inside
-        # velstand's make, via its WARM_START.)
-        _collapse_curricula_to_final(cfg)
+        # The velocity factory already collapsed its inherited walk recipe.
+        # Keep velstand's recovery phases staged; collapsing them here made the
+        # previous run start with 45% prone resets and no fall termination.
+
+        cfg.curriculum["standing_envs"] = CurriculumTermCfg(
+            func=microduck_mdp.standing_envs_curriculum,
+            params={
+                "command_name": "twist",
+                "standing_stages": [
+                    {"step": it * NUM_STEPS_PER_ENV, "rel_standing_envs": frac}
+                    for it, frac in STANDING_STAGES
+                ],
+            },
+        )
+
+        cfg.curriculum["fell_over_disable"] = CurriculumTermCfg(
+            func=microduck_mdp.termination_param_curriculum,
+            params={
+                "term_name": "fell_over",
+                "param_stages": [
+                    {"step": 0, "params": {"limit_angle": math.radians(70.0)}},
+                    {
+                        "step": FELL_OVER_DISABLE_ITER * NUM_STEPS_PER_ENV,
+                        "params": {"limit_angle": math.pi},
+                    },
+                ],
+            },
+        )
+
+        cfg.curriculum["prone_init_prob"] = CurriculumTermCfg(
+            func=microduck_mdp.event_param_curriculum,
+            params={
+                "event_name": "random_prone_init",
+                "param_stages": [
+                    {
+                        "step": it * NUM_STEPS_PER_ENV,
+                        "params": {
+                            "prone_prob": prone,
+                            "face_down_prob": face_down,
+                            "side_prob": side,
+                            "crouch_prob": crouch,
+                        },
+                    }
+                    for it, prone, face_down, side, crouch in PRONE_STAGES
+                ],
+            },
+        )
+
+        cfg.curriculum["topple_push_range"] = CurriculumTermCfg(
+            func=microduck_mdp.push_curriculum,
+            params={
+                "event_name": "topple_push",
+                "push_stages": [
+                    {
+                        "step": it * NUM_STEPS_PER_ENV,
+                        "velocity_range": {"x": velocity_range, "y": velocity_range},
+                    }
+                    for it, velocity_range in TOPPLE_PUSH_STAGES
+                ],
+            },
+        )
 
         # (2) episode-open ramp on the twist command (training only).
         tw = cfg.commands["twist"]
@@ -114,7 +196,8 @@ def make_microduck_run_env_cfg(play: bool = False, rough: bool = False) -> Manag
             slow_frac=RAMP_SLOW_FRAC,
         )
 
-        # (1) staged lin_vel_x widening — the ONLY curriculum that ramps.
+        # Staged lin_vel_x widening; all other safety curricula above remain
+        # explicit so future edits cannot accidentally collapse them again.
         cfg.curriculum["velocity_x_range"] = CurriculumTermCfg(
             func=microduck_mdp.velocity_x_range_curriculum,
             params={
@@ -178,14 +261,14 @@ MicroduckRunRlCfg = RslRlOnPolicyRunnerCfg(
         symmetry_cfg=None,
         bc_cfg={
             **default_bc_cfg(),
-            # Stand expert OFF for v5 (recovery is not being retrained; v4's
-            # recovered behaviour stays via the warm start). With coef=0 the
-            # distillation algorithm skips loading this unused checkpoint.
+            # Keep recovery labels active while PPO learns the new run stages.
+            # Both teachers use the same 61D-compatible v4 checkpoint.
             "wandb_run_path": V4_WANDB_RUN,
             "checkpoint_name": V4_CHECKPOINT,
-            "coef": 0.0,
-            "gate_tilt_deg": 180.0,
-            "expert_mask_cols": (),
+            "coef": 1.0,
+            "gate_tilt_deg": 35.0,
+            "expert_mask_cols": tuple(range(6, 48)),
+            "expert_mask_tilt_deg": 75.0,
             # v4 walk anchor: standing / slow-walk / turn frames only.
             "anchor_wandb_run_path": V4_WANDB_RUN,
             "anchor_checkpoint_name": V4_CHECKPOINT,
