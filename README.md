@@ -55,6 +55,13 @@ uv run train Mjlab-Velocity-Flat-MicroDuck --env.scene.num-envs 4096 \
 No GPU? Add `--hf-jobs` to any train command to run it on Hugging Face Jobs
 instead of locally (see [scripts/hf/README.md](scripts/hf/README.md)).
 
+Train the randomized stand-up task with the exact task ID below. Its W&B
+experiment name and run name are both `v6-StandUp`:
+
+```bash
+uv run train v6-StandUp --env.scene.num-envs 4096 --agent.max_iterations 15000
+```
+
 ## Tasks
 
 `uv run list-envs` prints the live registry. Flat/Rough variants exist where noted.
@@ -68,7 +75,7 @@ instead of locally (see [scripts/hf/README.md](scripts/hf/README.md)).
 | `Mjlab-Velocity-{Flat,Rough}-MicroDuck` | flat/rough | **The main task**: walking with velocity commands + head-pose commands |
 | `Mjlab-VelStand-{Flat,Rough}-MicroDuck` | flat/rough | Walking + fall recovery in one policy |
 | `Mjlab-StandUp-{Flat,Rough}-MicroDuck` | flat/rough | Stand up from face-down/face-up/sitting, then hold the stand + body-pose control |
-| `Mjlab-v6-StandUp-{Flat,Rough}-MicroDuck` | flat/rough | Broad randomized standing/sitting/fallen starts, progressively widened during training |
+| `v6-StandUp` / `v6-StandUp-Rough` | flat/rough | Broad randomized standing/sitting/fallen starts, progressively widened during training |
 | `Mjlab-SitStand-{Flat,Rough}-MicroDuck` | flat/rough | Commanded sit ↔ stand in one policy, gently, head commandable |
 | `Mjlab-GroundPick-{Flat,Rough}-MicroDuck` | flat/rough | Crouch and touch the ground with the mouth tip, return to stand |
 | `Mjlab-BallKick-Flat-MicroDuck` | flat | Kick a 70 mm / 15 g ball forward (actor is ball-blind) |

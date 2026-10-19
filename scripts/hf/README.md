@@ -20,6 +20,13 @@ uv run train Mjlab-Kick-Flat-MicroDuck \
     --env.scene.num-envs 4096 --agent.max_iterations 4000 --hf-jobs
 ```
 
+For the randomized stand-up task:
+
+```fish
+uv run train v6-StandUp \
+    --env.scene.num-envs 4096 --agent.max_iterations 15000 --hf-jobs
+```
+
 You'll be asked which namespace to run under — your personal account or one
 of your orgs. Repos, uv-cache bucket, billing and the job itself all live in
 the chosen namespace. Pass `--namespace <name>` to skip the prompt

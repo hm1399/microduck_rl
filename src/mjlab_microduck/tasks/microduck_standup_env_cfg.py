@@ -1264,5 +1264,5 @@ MicroduckStandUpRlCfg = RslRlOnPolicyRunnerCfg(
 )
 
 MicroduckV6StandUpRlCfg = deepcopy(MicroduckStandUpRlCfg)
-MicroduckV6StandUpRlCfg.experiment_name = "microduck_v6_standup"
-MicroduckV6StandUpRlCfg.run_name = "microduck_v6_standup"
+MicroduckV6StandUpRlCfg.experiment_name = "v6-StandUp"
+MicroduckV6StandUpRlCfg.run_name = "v6-StandUp"

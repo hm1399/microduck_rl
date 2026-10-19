@@ -40,5 +40,12 @@ def test_v6_task_is_registered():
     from mjlab.tasks.registry import list_tasks
     import mjlab_microduck.tasks  # noqa: F401
 
-    assert "Mjlab-v6-StandUp-Flat-MicroDuck" in list_tasks()
-    assert "Mjlab-v6-StandUp-Flat-Backlash-MicroDuck" in list_tasks()
+    assert "v6-StandUp" in list_tasks()
+    assert "v6-StandUp-Backlash" in list_tasks()
+
+
+def test_v6_wandb_names_match_task_name():
+    from mjlab_microduck.tasks.microduck_standup_env_cfg import MicroduckV6StandUpRlCfg
+
+    assert MicroduckV6StandUpRlCfg.experiment_name == "v6-StandUp"
+    assert MicroduckV6StandUpRlCfg.run_name == "v6-StandUp"
