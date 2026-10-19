@@ -1234,7 +1234,10 @@ def main():
     parser = argparse.ArgumentParser(description="Run ONNX policy in MuJoCo")
     parser.add_argument("--roller", action="store_true", help="Use roller skate robot XML (robot_walk_rollers.xml)")
     parser.add_argument("--scene", type=str, default=None, help="Path to a scene XML, overriding the default pick (e.g. src/mjlab_microduck/robot/microduck/scene_allcollisions.xml)")
-    parser.add_argument("--walking", type=str, default=None, help="Path to walking policy ONNX file")
+    parser.add_argument(
+        "--walking", "--motion", dest="walking", type=str, default=None,
+        help="Path to walking/running motion policy ONNX file",
+    )
     parser.add_argument("--standing", "-s", type=str, default=None, help="Path to standing policy ONNX file")
     parser.add_argument("--ground-pick", type=str, default=None, help="Path to ground pick policy ONNX file (press G to activate)")
     parser.add_argument("--sit", type=str, default=None, help="Path to OLD one-way sitting policy ONNX file (press Y to sit, Y again switches back to standing/walking policy)")
@@ -1248,6 +1251,10 @@ def main():
     parser.add_argument("--lin-vel-x", type=float, default=0.0, help="Initial linear velocity X command (m/s)")
     parser.add_argument("--lin-vel-y", type=float, default=0.0, help="Initial linear velocity Y command (m/s)")
     parser.add_argument("--ang-vel-z", type=float, default=0.0, help="Initial angular velocity Z command (rad/s)")
+    parser.add_argument(
+        "--max-lin-vel-x", type=float, default=None,
+        help="Override maximum forward/backward command magnitude (m/s)",
+    )
     parser.add_argument("--control-host", type=str, default="127.0.0.1",
                         help="Host for the virtual joystick UDP control server")
     parser.add_argument("--control-port", type=int, default=0,
@@ -1438,6 +1445,12 @@ def main():
         policy.vel_max_y = 0.2
         policy.vel_min_y = -0.2
         policy.vel_max_ang = 1.5
+
+    if args.max_lin_vel_x is not None:
+        max_lin_vel_x = abs(args.max_lin_vel_x)
+        policy.vel_max_x = max_lin_vel_x
+        policy.vel_min_x = -max_lin_vel_x
+        print(f"Forward command range overridden: [{policy.vel_min_x:.2f}, {policy.vel_max_x:.2f}] m/s")
 
     # Set initial position to default pose
     freejoint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "trunk_base_freejoint")
