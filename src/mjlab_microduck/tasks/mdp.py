@@ -5949,6 +5949,82 @@ def head_pose_bias_penalty(
     return out
 
 
+def standing_hold_bonus(
+    env: ManagerBasedRlEnv,
+    hold_s: float = 5.0,
+    height_low: float = 0.10,
+    height_high: float = 0.115,
+    tilt_full_deg: float = 10.0,
+    tilt_zero_deg: float = 25.0,
+    pose_std: float = 0.15,
+    joint_indices: Optional[list] = None,
+    lin_vel_max: float = 0.1,
+    ang_vel_max: float = 0.3,
+    gate_min: float = 0.5,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Time-ramped bonus for HOLDING the reference standing pose ("站稳 N 秒").
+
+    Complements the instantaneous standing terms (pose/height/upright/composite):
+    this one pays for STAYING at the reference pose, not just visiting it. All
+    gates must pass for an internal per-env counter to increment; any violation
+    (or episode reset) zeroes it. Reward = min(counter, cap) / cap, so each
+    additional held second pays more, saturating at ``hold_s``.
+
+    Positive-only: it taxes no motion, so unlike arrival_damping it needs no
+    late introduction — during ground/recovery phases the gates don't pass and
+    the term is simply inert.
+
+    Gates: trunk-height smoothstep (height_low..height_high), tilt smoothstep
+    (tilt_full_deg..tilt_zero_deg), near-zero base linear/angular velocity,
+    and a Gaussian mean over the given joints vs HOME (default pose match).
+    ``gate_min`` is the hold-admission threshold on the gate product.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    n = env.num_envs
+
+    if not hasattr(env, "_standing_hold_steps") or env._standing_hold_steps.shape[0] != n:
+        env._standing_hold_steps = torch.zeros(n, device=env.device)
+
+    # Height gate
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2],
+        nan=0.0,
+    )
+    t = torch.clamp((z - height_low) / max(height_high - height_low, 1e-6), 0.0, 1.0)
+    gate = t * t * (3.0 - 2.0 * t)
+    # Tilt gate
+    quat = asset.data.root_link_quat_w
+    cos_tilt = 1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2)
+    tilt_deg = torch.rad2deg(torch.acos(cos_tilt.clamp(-1.0, 1.0)))
+    st = torch.clamp(
+        (tilt_zero_deg - tilt_deg) / max(tilt_zero_deg - tilt_full_deg, 1e-6),
+        0.0, 1.0,
+    )
+    gate = gate * (st * st * (3.0 - 2.0 * st))
+    # Stillness gate
+    lv = torch.linalg.norm(asset.data.root_link_lin_vel_w[:, :2], dim=-1)
+    av = torch.linalg.norm(asset.data.root_link_ang_vel_w, dim=-1)
+    gate = gate * ((lv < lin_vel_max) & (av < ang_vel_max)).float()
+    # Pose gate — Gaussian mean of joint match vs HOME
+    target = _servo_default_joint_pos(env, asset)
+    qpos = _servo_joint_pos(env, asset)
+    if joint_indices is not None:
+        qpos = qpos[:, joint_indices]
+        target = target[:, joint_indices]
+    gate = gate * torch.exp(-((qpos - target) / pose_std) ** 2).mean(dim=-1)
+
+    # Counter: increment while all gates pass, zero on violation/reset
+    fresh = env.episode_length_buf <= 1
+    inc = (gate >= gate_min).float()
+    env._standing_hold_steps = torch.where(
+        fresh, torch.zeros_like(env._standing_hold_steps),
+        env._standing_hold_steps + inc,
+    )
+    cap = max(1, round(hold_s / float(env.step_dt)))
+    return torch.clamp(env._standing_hold_steps, max=cap).float() / float(cap)
+
+
 def body_pose_tracking_6d(
     env: ManagerBasedRlEnv,
     command_name: str = "body_pose",

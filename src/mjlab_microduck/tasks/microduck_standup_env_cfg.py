@@ -1222,6 +1222,79 @@ def make_microduck_v6_standup_env_cfg(
     return cfg
 
 
+def make_microduck_v61_standup_env_cfg(
+    play: bool = False,
+    rough: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """v6.1 — v6 基础上强制"标准站姿"：头颈不许下垂 + 站稳 5s 加成。
+
+    动机（v6/23750 仿真回放实测）：v6 的 HOME 参考头本是抬起的，但头颈被排除
+    在所有固定姿势奖励之外，head_pose_tracking 容差 29° 过松，策略学会了
+    "头下垂当配重 + 弯腿省功"的省电站姿。本版本不改 HOME（质心已居中），
+    只加强执行：
+
+      1. pose_stand_neck —— 头颈 4 关节对 HOME 的 Gaussian（std 6°），
+         3000 轮后由课程引入（保护恢复技能发现期，arrival_damping 节奏）。
+      2. standing_hold —— 全门控（高度/倾斜/静止/腿+颈姿势）通过时计数，
+         连续站稳每秒线性加奖、5s 封顶、掉门清零。正向奖励，全程可用。
+      3. head_pose_tracking 启用窄容差分量（fine_std=0.1, fine_weight=0.5，
+         函数原生支持，v6 配置未开）——小下垂从免费变昂贵。
+      4. head_pose_bias 末段 1.5 → 2.5。
+      5. standing_composite 的关节覆盖扩到全身（腿+颈）。
+    """
+    cfg = make_microduck_v6_standup_env_cfg(play=play, rough=rough)
+
+    # (1) 头颈对 HOME 的 Gaussian。权重 0 起步，3000 轮后拉入。
+    cfg.rewards["pose_stand_neck"] = RewardTermCfg(
+        func=microduck_mdp.pose_target_match,
+        weight=0.0,  # 由 pose_stand_neck_weight 课程引入
+        params={"std": 0.1, "joint_indices": _NECK_JOINTS, "target_overrides": None},
+    )
+    # (2) 站稳 5s 线性加成。
+    cfg.rewards["standing_hold"] = RewardTermCfg(
+        func=microduck_mdp.standing_hold_bonus,
+        weight=2.0,
+        params={
+            "hold_s": 5.0,
+            "height_low": 0.10,
+            "height_high": 0.115,
+            "tilt_full_deg": 10.0,
+            "tilt_zero_deg": 25.0,
+            "pose_std": 0.15,
+            "joint_indices": _LEG_JOINTS + _NECK_JOINTS,
+            "lin_vel_max": 0.1,
+            "ang_vel_max": 0.3,
+            "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
+        },
+    )
+    # (3) 头部跟踪窄容差分量。
+    cfg.rewards["head_pose_tracking"].params["fine_std"] = 0.1
+    cfg.rewards["head_pose_tracking"].params["fine_weight"] = 0.5
+    # (5) 综合站姿分扩到全身（含头颈）。
+    cfg.rewards["standing_composite"].params["joint_indices"] = (
+        _LEG_JOINTS + _NECK_JOINTS
+    )
+    # (4) head_pose_bias 末段加强。
+    cfg.curriculum["head_pose_bias_weight"].params["weight_stages"] = [
+        {"step": 0, "weight": 0.0},
+        {"step": 3000 * 24, "weight": 0.5},
+        {"step": 4000 * 24, "weight": 2.5},
+    ]
+    # (1) 的引入时机：与 arrival_damping/head_pose_bias 同节奏。
+    cfg.curriculum["pose_stand_neck_weight"] = CurriculumTermCfg(
+        func=microduck_mdp.reward_weight,
+        params={
+            "reward_name": "pose_stand_neck",
+            "weight_stages": [
+                {"step": 0, "weight": 0.0},
+                {"step": 3000 * 24, "weight": 1.0},
+                {"step": 4000 * 24, "weight": 2.0},
+            ],
+        },
+    )
+    return cfg
+
+
 # ── RL runner config ──────────────────────────────────────────────────────────
 
 MicroduckStandUpRlCfg = RslRlOnPolicyRunnerCfg(
@@ -1266,3 +1339,7 @@ MicroduckStandUpRlCfg = RslRlOnPolicyRunnerCfg(
 MicroduckV6StandUpRlCfg = deepcopy(MicroduckStandUpRlCfg)
 MicroduckV6StandUpRlCfg.experiment_name = "v6-StandUp"
 MicroduckV6StandUpRlCfg.run_name = "v6-StandUp"
+
+MicroduckV61StandUpRlCfg = deepcopy(MicroduckV6StandUpRlCfg)
+MicroduckV61StandUpRlCfg.experiment_name = "v6.1-StandUp"
+MicroduckV61StandUpRlCfg.run_name = "v6.1-StandUp"
