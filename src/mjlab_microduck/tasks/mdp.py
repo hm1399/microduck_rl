@@ -4575,6 +4575,7 @@ def set_random_v6_standup_state(
     sitting_joint_noise_std: float = 0.12,
     standing_joint_noise_std: float = 0.08,
     sitting_tilt_max: float = 0.0,
+    track_v62_episode_type: bool = False,
 ):
     """Reset v6 into varied upright, sitting, and fallen states.
 
@@ -4596,6 +4597,9 @@ def set_random_v6_standup_state(
     is_stand = u < stand_cut
     is_sit = (u >= stand_cut) & (u < sit_cut)
     prone_ids = env_ids[~(is_stand | is_sit)]
+
+    if track_v62_episode_type:
+        _reset_v62_recovery_state(env, env_ids, push_episode=is_stand)
 
     if is_stand.any():
         set_random_ground_state(
@@ -4658,6 +4662,69 @@ def set_random_v6_standup_state(
             range_frac=joint_range_frac,
         )
         env.sim.data.qpos[joint_ids, 2] += joint_random_extra_z
+
+
+def apply_v62_push_once(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    magnitude_range: tuple[float, float] = (0.0, 0.0),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Apply one horizontal, direction-uniform velocity kick per push episode.
+
+    The interval event calls this every second, but the per-episode guard makes
+    only the first call effective. Sampling a magnitude and an independent
+    angle keeps the configured limit radial; independent x/y ranges would make
+    diagonal kicks ``sqrt(2)`` stronger than axial kicks.
+    """
+    _v62_state(env)
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    eligible = (
+        env._v62_push_episode[env_ids]
+        & ~env._v62_push_applied[env_ids]
+        & (env._v62_phase[env_ids] == _V62_WAIT_PUSH)
+    )
+    ids = env_ids[eligible]
+    if len(ids) == 0:
+        return
+
+    lo, hi = magnitude_range
+    if lo < 0.0 or hi < lo:
+        raise ValueError(f"invalid v6.2 push magnitude range: {magnitude_range}")
+    magnitude = torch.empty(len(ids), device=env.device).uniform_(lo, hi)
+    angle = torch.rand(len(ids), device=env.device) * (2.0 * math.pi)
+
+    asset: Entity = env.scene[asset_cfg.name]
+    velocity = asset.data.root_link_vel_w[ids].clone()
+    velocity[:, 0] += magnitude * torch.cos(angle)
+    velocity[:, 1] += magnitude * torch.sin(angle)
+    asset.write_root_link_velocity_to_sim(velocity, env_ids=ids)
+
+    env._v62_push_applied[ids] = True
+    env._v62_phase[ids] = _V62_RECOVER
+    env._v62_recovery_steps[ids] = 0
+    env._v62_valid_steps[ids] = 0
+    env._v62_hold_steps[ids] = 0
+    env._v62_last_push_magnitude[ids] = magnitude
+
+
+def v62_push_magnitude_curriculum(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    event_name: str,
+    magnitude_stages: list[dict],
+) -> torch.Tensor:
+    """Update the radial v6.2 push range and log its current upper bound."""
+    del env_ids
+    event_cfg = env.event_manager.get_term_cfg(event_name)
+    current = magnitude_stages[0]["magnitude_range"]
+    for stage in magnitude_stages:
+        if env.common_step_counter >= stage["step"]:
+            current = stage["magnitude_range"]
+    event_cfg.params["magnitude_range"] = current
+    return torch.tensor([float(current[1])], device=env.device)
 
 
 # Deep-crouch anchor pose (velstand run-5): the "stuck" mid-recovery basin —
@@ -6023,6 +6090,232 @@ def standing_hold_bonus(
     )
     cap = max(1, round(hold_s / float(env.step_dt)))
     return torch.clamp(env._standing_hold_steps, max=cap).float() / float(cap)
+
+
+# v6.2 recovery phases. These live in the MDP module so reset events,
+# interval events, rewards, and terminations all use one source of truth.
+_V62_WAIT_PUSH = 0
+_V62_RECOVER = 1
+_V62_HOLD = 2
+_V62_COMPLETE = 3
+_V62_FAILED = 4
+
+
+def _v62_state(env: ManagerBasedRlEnv) -> None:
+    """Allocate the per-environment v6.2 episode state on first use."""
+    n = env.num_envs
+    if hasattr(env, "_v62_phase") and env._v62_phase.shape[0] == n:
+        return
+    env._v62_phase = torch.full(
+        (n,), _V62_RECOVER, device=env.device, dtype=torch.long
+    )
+    env._v62_push_episode = torch.zeros(n, device=env.device, dtype=torch.bool)
+    env._v62_push_applied = torch.zeros(n, device=env.device, dtype=torch.bool)
+    env._v62_recovery_steps = torch.zeros(n, device=env.device, dtype=torch.long)
+    env._v62_valid_steps = torch.zeros(n, device=env.device, dtype=torch.long)
+    env._v62_hold_steps = torch.zeros(n, device=env.device, dtype=torch.long)
+    env._v62_recovery_reward_pulse = torch.zeros(n, device=env.device)
+    env._v62_timeout_reward_pulse = torch.zeros(n, device=env.device)
+    env._v62_hold_reward_pulse = torch.zeros(n, device=env.device)
+    env._v62_last_push_magnitude = torch.zeros(n, device=env.device)
+    env._v62_last_update_step = -1
+
+
+def _reset_v62_recovery_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    push_episode: torch.Tensor,
+) -> None:
+    """Reset only the selected environments, preserving asynchronous episodes."""
+    _v62_state(env)
+    ids = env_ids.to(env.device, dtype=torch.long)
+    push_episode = push_episode.to(env.device, dtype=torch.bool)
+    env._v62_push_episode[ids] = push_episode
+    env._v62_push_applied[ids] = False
+    env._v62_phase[ids] = torch.where(
+        push_episode,
+        torch.full_like(ids, _V62_WAIT_PUSH),
+        torch.full_like(ids, _V62_RECOVER),
+    )
+    env._v62_recovery_steps[ids] = 0
+    env._v62_valid_steps[ids] = 0
+    env._v62_hold_steps[ids] = 0
+    env._v62_recovery_reward_pulse[ids] = 0.0
+    env._v62_timeout_reward_pulse[ids] = 0.0
+    env._v62_hold_reward_pulse[ids] = 0.0
+    env._v62_last_push_magnitude[ids] = 0.0
+
+
+def _v62_standing_valid(
+    env: ManagerBasedRlEnv,
+    height_min: float = 0.10,
+    tilt_max_deg: float = 15.0,
+    neck_error_max_deg: float = 30.0,
+    lin_vel_max: float = 0.08,
+    ang_vel_max: float = 0.20,
+    feet_sensor_name: str = "feet_ground_contact",
+    head_sensor_name: str = "head_ground_contact",
+    neck_joint_indices: Optional[list] = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Strict v6.2 standing predicate used by recovery and hold windows."""
+    asset: Entity = env.scene[asset_cfg.name]
+    origins = env.scene.terrain.env_origins
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - origins[:, 2], nan=-1.0
+    )
+
+    quat = asset.data.root_link_quat_w
+    cos_tilt = 1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2)
+    tilt_deg = torch.rad2deg(torch.acos(cos_tilt.clamp(-1.0, 1.0)))
+
+    found = env.scene.sensors[feet_sensor_name].data.found
+    feet_contact = (found.reshape(env.num_envs, 2, -1) > 0).any(dim=-1).all(dim=-1)
+    head_contact = _sensor_any_contact(env, head_sensor_name)
+    if head_contact is None:
+        head_clear = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    else:
+        head_clear = ~head_contact
+
+    servo_pos = _servo_joint_pos(env, asset)
+    servo_default = _servo_default_joint_pos(env, asset)
+    indices = neck_joint_indices if neck_joint_indices is not None else [5, 6, 7, 8]
+    neck_error = (servo_pos[:, indices] - servo_default[:, indices]).abs().amax(dim=-1)
+
+    lin_speed = torch.linalg.norm(asset.data.root_link_lin_vel_w[:, :2], dim=-1)
+    ang_speed = torch.linalg.norm(asset.data.root_link_ang_vel_w, dim=-1)
+    finite = (
+        torch.isfinite(z)
+        & torch.isfinite(tilt_deg)
+        & torch.isfinite(neck_error)
+        & torch.isfinite(lin_speed)
+        & torch.isfinite(ang_speed)
+    )
+    return (
+        finite
+        & (z >= height_min)
+        & (tilt_deg <= tilt_max_deg)
+        & feet_contact
+        & head_clear
+        & (neck_error <= math.radians(neck_error_max_deg))
+        & (lin_speed <= lin_vel_max)
+        & (ang_speed <= ang_vel_max)
+    )
+
+
+def _update_v62_recovery_state(
+    env: ManagerBasedRlEnv,
+    recovery_deadline_s: float = 5.0,
+    recovery_confirm_s: float = 0.4,
+    hold_s: float = 5.0,
+    recovery_success_bonus: float = 5.0,
+    recovery_early_bonus: float = 5.0,
+    recovery_timeout_penalty: float = -5.0,
+    hold_success_bonus: float = 8.0,
+    **standing_params,
+) -> None:
+    """Advance the v6.2 state machine at most once per control step."""
+    _v62_state(env)
+    step = int(env.common_step_counter)
+    if env._v62_last_update_step == step:
+        return
+    env._v62_last_update_step = step
+    env._v62_recovery_reward_pulse.zero_()
+    env._v62_timeout_reward_pulse.zero_()
+    env._v62_hold_reward_pulse.zero_()
+
+    valid = _v62_standing_valid(env, **standing_params)
+    recovering = env._v62_phase == _V62_RECOVER
+    env._v62_recovery_steps[recovering] += 1
+    env._v62_valid_steps = torch.where(
+        recovering & valid,
+        env._v62_valid_steps + 1,
+        torch.where(recovering, torch.zeros_like(env._v62_valid_steps), env._v62_valid_steps),
+    )
+
+    confirm_steps = max(1, round(recovery_confirm_s / float(env.step_dt)))
+    just_recovered = recovering & (env._v62_valid_steps >= confirm_steps)
+    if just_recovered.any():
+        elapsed_s = env._v62_recovery_steps.float() * float(env.step_dt)
+        remaining = torch.clamp(
+            1.0 - elapsed_s / max(recovery_deadline_s, 1e-6), min=0.0, max=1.0
+        )
+        env._v62_recovery_reward_pulse[just_recovered] = (
+            recovery_success_bonus + recovery_early_bonus * remaining[just_recovered]
+        )
+        env._v62_phase[just_recovered] = _V62_HOLD
+        env._v62_hold_steps[just_recovered] = 0
+
+    deadline_steps = max(1, round(recovery_deadline_s / float(env.step_dt)))
+    timed_out = (
+        (env._v62_phase == _V62_RECOVER)
+        & (env._v62_recovery_steps >= deadline_steps)
+    )
+    env._v62_timeout_reward_pulse[timed_out] = recovery_timeout_penalty
+    env._v62_phase[timed_out] = _V62_FAILED
+
+    holding = (env._v62_phase == _V62_HOLD) & ~just_recovered
+    env._v62_hold_steps = torch.where(
+        holding & valid,
+        env._v62_hold_steps + 1,
+        torch.where(holding, torch.zeros_like(env._v62_hold_steps), env._v62_hold_steps),
+    )
+    hold_steps = max(1, round(hold_s / float(env.step_dt)))
+    completed = holding & (env._v62_hold_steps >= hold_steps)
+    env._v62_hold_reward_pulse[completed] = hold_success_bonus
+    env._v62_phase[completed] = _V62_COMPLETE
+
+
+def v62_recovery_deadline_reward(env: ManagerBasedRlEnv, **params) -> torch.Tensor:
+    """Return exact one-shot episode bonuses despite RewardManager's dt scale."""
+    _update_v62_recovery_state(env, **params)
+    pulse = (
+        env._v62_recovery_reward_pulse
+        + env._v62_timeout_reward_pulse
+        + env._v62_hold_reward_pulse
+    )
+    return pulse / float(env.step_dt)
+
+
+def v62_recovery_timeout(env: ManagerBasedRlEnv, **params) -> torch.Tensor:
+    """Terminate an episode on the single 5-second recovery deadline pulse."""
+    _update_v62_recovery_state(env, **params)
+    return env._v62_timeout_reward_pulse != 0.0
+
+
+def v62_hold_complete(env: ManagerBasedRlEnv, **params) -> torch.Tensor:
+    """Terminate successful episodes after five uninterrupted hold seconds."""
+    _update_v62_recovery_state(env, **params)
+    return env._v62_hold_reward_pulse != 0.0
+
+
+def head_ground_contact_near_standing(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "head_ground_contact",
+    height_low: float = 0.08,
+    height_high: float = 0.10,
+    tilt_full_deg: float = 20.0,
+    tilt_zero_deg: float = 45.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Head-contact cost gated to near-standing poses, never ground recovery."""
+    contact = _sensor_any_contact(env, sensor_name)
+    if contact is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    asset: Entity = env.scene[asset_cfg.name]
+    z = asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2]
+    h = torch.clamp((z - height_low) / max(height_high - height_low, 1e-6), 0.0, 1.0)
+    h = h * h * (3.0 - 2.0 * h)
+    quat = asset.data.root_link_quat_w
+    cos_tilt = 1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2)
+    tilt_deg = torch.rad2deg(torch.acos(cos_tilt.clamp(-1.0, 1.0)))
+    t = torch.clamp(
+        (tilt_zero_deg - tilt_deg) / max(tilt_zero_deg - tilt_full_deg, 1e-6),
+        0.0,
+        1.0,
+    )
+    t = t * t * (3.0 - 2.0 * t)
+    return contact.float() * h * t
 
 
 def body_pose_tracking_6d(

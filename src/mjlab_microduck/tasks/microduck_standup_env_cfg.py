@@ -56,6 +56,24 @@ IMU_ORIENTATION_RANDOMIZATION_ANGLE = 6.0  # match velocity (was 2.0 — pre-aud
 # Episode length: long enough for a gentle rise + brief stabilisation.
 EPISODE_LENGTH_S = 6.0
 
+# v6.2 episode contract: 1 s prepare, at most 5 s recovery, then 5 s hold.
+# The extra second in the episode budget absorbs control-step/event boundaries.
+V62_EPISODE_LENGTH_S = 12.0
+V62_PREPARE_S = 1.0
+V62_RECOVERY_DEADLINE_S = 5.0
+V62_RECOVERY_CONFIRM_S = 0.4
+V62_HOLD_S = 5.0
+V62_RECOVERY_SUCCESS_BONUS = 5.0
+V62_RECOVERY_EARLY_BONUS = 5.0
+V62_RECOVERY_TIMEOUT_PENALTY = -5.0
+V62_HOLD_SUCCESS_BONUS = 8.0
+V62_PUSH_MAGNITUDE_STAGES = [
+    {"step": 0, "magnitude_range": (0.0, 0.0)},
+    {"step": 500 * 24, "magnitude_range": (0.05, 0.10)},
+    {"step": 1500 * 24, "magnitude_range": (0.10, 0.25)},
+    {"step": 3000 * 24, "magnitude_range": (0.20, 0.40)},
+]
+
 # ── Sitting source pose (asset.data.joint_pos index → angle in rad) ───────────
 # Must match the *actual end-state* of the sit policy. Mirrors the sit env's
 # SITTING_TARGET_OVERRIDES (microduck_sit_env_cfg.py) — the swept stable
@@ -1295,6 +1313,157 @@ def make_microduck_v61_standup_env_cfg(
     return cfg
 
 
+def make_microduck_v62_standup_env_cfg(
+    play: bool = False,
+    rough: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """v6.2: deadline-based recovery followed by a strict five-second hold."""
+    cfg = make_microduck_v61_standup_env_cfg(play=play, rough=rough)
+    cfg.episode_length_s = V62_EPISODE_LENGTH_S
+    required_s = V62_PREPARE_S + V62_RECOVERY_DEADLINE_S + V62_HOLD_S
+    if cfg.episode_length_s < required_s:
+        raise ValueError(
+            f"v6.2 episode needs at least {required_s:.1f}s for prepare/recovery/hold"
+        )
+    cfg.commands["twist"].resampling_time_range = (
+        V62_EPISODE_LENGTH_S,
+        2.0 * V62_EPISODE_LENGTH_S,
+    )
+
+    # This policy has one deployment goal: recover to the nominal idle pose.
+    # Wide head/body command curricula conflict with that goal and with the
+    # fixed HOME-pose acceptance test, so v6.2 trains exact zero commands.
+    head_command = cfg.commands["head_pose"]
+    head_command.ranges = ((0.0, 0.0),) * 4
+    head_command.zero_command_prob = 1.0
+    body_command = cfg.commands.get("body_pose")
+    if body_command is not None:
+        body_command.ranges = ((0.0, 0.0),) * 6
+        body_command.zero_command_prob = 1.0
+    cfg.curriculum.pop("head_pose_range", None)
+    cfg.curriculum.pop("body_pose_range", None)
+
+    # The reset event tells the state machine whether this episode should wait
+    # for a kick (standing reset) or recover immediately (sit/prone reset).
+    cfg.events["set_ground_state"].params["track_v62_episode_type"] = True
+    cfg.events.pop("push_robot", None)
+    cfg.curriculum.pop("push_magnitude", None)
+    push_range = (
+        V62_PUSH_MAGNITUDE_STAGES[-1]["magnitude_range"]
+        if play
+        else V62_PUSH_MAGNITUDE_STAGES[0]["magnitude_range"]
+    )
+    cfg.events["v62_push_once"] = EventTermCfg(
+        func=microduck_mdp.apply_v62_push_once,
+        mode="interval",
+        interval_range_s=(V62_PREPARE_S, V62_PREPARE_S),
+        params={
+            "magnitude_range": push_range,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    if not play:
+        cfg.curriculum["v62_push_magnitude"] = CurriculumTermCfg(
+            func=microduck_mdp.v62_push_magnitude_curriculum,
+            params={
+                "event_name": "v62_push_once",
+                "magnitude_stages": V62_PUSH_MAGNITUDE_STAGES,
+            },
+        )
+
+    # A dedicated head-ground sensor makes "head clear" a hard success gate.
+    # HEAD_BODY_NAMES also contains the historical, misnamed hip bearing_roll;
+    # exclude it here so hip contact cannot be mistaken for head contact.
+    v62_head_bodies = tuple(name for name in HEAD_BODY_NAMES if name != "bearing_roll")
+    head_ground_cfg = ContactSensorCfg(
+        name="head_ground_contact",
+        primary=ContactMatch(
+            mode="body",
+            pattern=rf"^({'|'.join(v62_head_bodies)})$",
+            entity="robot",
+        ),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found",),
+        reduce="none",
+        num_slots=1,
+    )
+    cfg.scene.sensors = tuple(cfg.scene.sensors) + (head_ground_cfg,)
+
+    state_params = {
+        "recovery_deadline_s": V62_RECOVERY_DEADLINE_S,
+        "recovery_confirm_s": V62_RECOVERY_CONFIRM_S,
+        "hold_s": V62_HOLD_S,
+        "recovery_success_bonus": V62_RECOVERY_SUCCESS_BONUS,
+        "recovery_early_bonus": V62_RECOVERY_EARLY_BONUS,
+        "recovery_timeout_penalty": V62_RECOVERY_TIMEOUT_PENALTY,
+        "hold_success_bonus": V62_HOLD_SUCCESS_BONUS,
+        "height_min": 0.10,
+        "tilt_max_deg": 15.0,
+        "neck_error_max_deg": 30.0,
+        "lin_vel_max": 0.08,
+        "ang_vel_max": 0.20,
+        "feet_sensor_name": "feet_ground_contact",
+        "head_sensor_name": "head_ground_contact",
+        "neck_joint_indices": _NECK_JOINTS,
+        "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
+    }
+    cfg.rewards["v62_recovery_deadline"] = RewardTermCfg(
+        func=microduck_mdp.v62_recovery_deadline_reward,
+        weight=1.0,
+        params=deepcopy(state_params),
+    )
+    cfg.terminations["v62_recovery_timeout"] = TerminationTermCfg(
+        func=microduck_mdp.v62_recovery_timeout,
+        time_out=False,
+        params=deepcopy(state_params),
+    )
+    cfg.terminations["v62_hold_complete"] = TerminationTermCfg(
+        func=microduck_mdp.v62_hold_complete,
+        time_out=False,
+        params=deepcopy(state_params),
+    )
+    cfg.rewards["head_contact_near_stand"] = RewardTermCfg(
+        func=microduck_mdp.head_ground_contact_near_standing,
+        weight=-2.0,
+        params={
+            "sensor_name": "head_ground_contact",
+            "height_low": 0.08,
+            "height_high": 0.10,
+            "tilt_full_deg": 20.0,
+            "tilt_zero_deg": 45.0,
+            "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
+        },
+    )
+
+    # Tight final-pose rewards remain gated/late so they refine a discovered
+    # recovery instead of making exploratory floor contact too expensive.
+    cfg.rewards["pose_stand_neck"].params["std"] = 0.07
+    cfg.rewards["head_pose_tracking"].params["fine_std"] = 0.07
+    cfg.rewards["standing_composite"].params["pose_std"] = 0.25
+    cfg.rewards["standing_composite"].params["upright_std"] = 0.25
+    cfg.rewards["standing_hold"].params.update(
+        {
+            "hold_s": V62_HOLD_S,
+            "height_low": 0.10,
+            "height_high": 0.120,
+            "tilt_full_deg": 8.0,
+            "tilt_zero_deg": 15.0,
+            "pose_std": 0.10,
+            "lin_vel_max": 0.08,
+            "ang_vel_max": 0.20,
+        }
+    )
+    cfg.curriculum["pose_stand_neck_weight"].params["weight_stages"][-1]["weight"] = 3.0
+    cfg.curriculum["head_pose_bias_weight"].params["weight_stages"][-1]["weight"] = 3.0
+    cfg.curriculum["action_rate_weight"].params["weight_stages"] = [
+        {"step": 0, "weight": -0.1},
+        {"step": 500 * 24, "weight": -0.2},
+        {"step": 1000 * 24, "weight": -0.4},
+        {"step": 1500 * 24, "weight": -0.6},
+    ]
+    return cfg
+
+
 # ── RL runner config ──────────────────────────────────────────────────────────
 
 MicroduckStandUpRlCfg = RslRlOnPolicyRunnerCfg(
@@ -1343,3 +1512,7 @@ MicroduckV6StandUpRlCfg.run_name = "v6-StandUp"
 MicroduckV61StandUpRlCfg = deepcopy(MicroduckV6StandUpRlCfg)
 MicroduckV61StandUpRlCfg.experiment_name = "v6.1-StandUp"
 MicroduckV61StandUpRlCfg.run_name = "v6.1-StandUp"
+
+MicroduckV62StandUpRlCfg = deepcopy(MicroduckV61StandUpRlCfg)
+MicroduckV62StandUpRlCfg.experiment_name = "v6.2-StandUp"
+MicroduckV62StandUpRlCfg.run_name = "v6.2-StandUp"
