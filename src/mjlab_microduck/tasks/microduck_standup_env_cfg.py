@@ -1464,6 +1464,99 @@ def make_microduck_v62_standup_env_cfg(
     return cfg
 
 
+def make_microduck_v63_standup_env_cfg(
+    play: bool = False,
+    rough: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """v6.3: nonlinear fast recovery, linear hold, and signed near-stand pose.
+
+    The 1 s prepare + 5 s recovery + 5 s hold budget is unchanged: v6.2 W&B
+    showed recovery-deadline terminations, not 12 s episode truncation, and a
+    10 s replay did not improve the final policy's 6/17 acceptance result.
+    """
+    cfg = make_microduck_v62_standup_env_cfg(play=play, rough=rough)
+
+    # Remove absolute standing-state rewards that v6.2 could farm from a stable
+    # head tripod. Ground recovery keeps only potential-based progress: holding
+    # any bad pose pays zero, while rising/rotating toward upright pays progress.
+    for name in [
+        "pose_stand_legs", "pose_stand_l1", "pose_stand_neck",
+        "height_stand", "height_stand_sharp", "height_stand_l1",
+        "upright_linear", "upright_sharp", "standing_composite",
+        "body_pose_tracking", "head_pose_tracking", "head_pose_bias",
+        "standing_hold", "head_contact_near_stand", "com_upward_velocity",
+        "v62_recovery_deadline",
+    ]:
+        cfg.rewards.pop(name, None)
+    for name in [
+        "height_stand_sharp_weight", "upright_sharp_weight",
+        "standing_composite_weight", "body_pose_tracking_weight",
+        "pose_stand_neck_weight", "head_pose_bias_weight",
+    ]:
+        cfg.curriculum.pop(name, None)
+    for name in ["v62_recovery_timeout", "v62_hold_complete"]:
+        cfg.terminations.pop(name, None)
+
+    cfg.rewards["upright_progress"] = RewardTermCfg(
+        func=microduck_mdp.upright_progress,
+        weight=5.0,
+        params={"asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",))},
+    )
+    cfg.rewards["height_progress"] = RewardTermCfg(
+        func=microduck_mdp.height_progress,
+        weight=30.0,
+        params={
+            "ceiling": 0.115,
+            "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
+        },
+    )
+    pose_params = {
+        "feet_sensor_name": "feet_ground_contact",
+        "head_sensor_name": "head_ground_contact",
+        "leg_joint_indices": _LEG_JOINTS,
+        "neck_joint_indices": _NECK_JOINTS,
+        "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
+    }
+    cfg.rewards["v63_signed_pose"] = RewardTermCfg(
+        func=microduck_mdp.v63_signed_pose_reward,
+        weight=1.0,
+        params=deepcopy(pose_params),
+    )
+    state_params = {
+        **pose_params,
+        "recovery_deadline_s": V62_RECOVERY_DEADLINE_S,
+        "recovery_confirm_s": V62_RECOVERY_CONFIRM_S,
+        "hold_s": V62_HOLD_S,
+        "session_deadline_s": V62_EPISODE_LENGTH_S,
+        "height_min": 0.10,
+        "tilt_max_deg": 15.0,
+        "neck_error_max_deg": 30.0,
+        "lin_vel_max": 0.08,
+        "ang_vel_max": 0.20,
+    }
+    cfg.rewards["v63_recovery"] = RewardTermCfg(
+        func=microduck_mdp.v63_recovery_reward,
+        weight=1.0,
+        params=deepcopy(state_params),
+    )
+    cfg.terminations["v63_recovery_timeout"] = TerminationTermCfg(
+        func=microduck_mdp.v63_recovery_timeout,
+        time_out=False,
+        params=deepcopy(state_params),
+    )
+    cfg.terminations["v63_hold_complete"] = TerminationTermCfg(
+        func=microduck_mdp.v63_hold_complete,
+        time_out=False,
+        params=deepcopy(state_params),
+    )
+    cfg.terminations["v63_session_timeout"] = TerminationTermCfg(
+        func=microduck_mdp.v63_session_timeout,
+        time_out=False,
+        params=deepcopy(state_params),
+    )
+    return cfg
+
+
 # ── RL runner config ──────────────────────────────────────────────────────────
 
 MicroduckStandUpRlCfg = RslRlOnPolicyRunnerCfg(
@@ -1516,3 +1609,7 @@ MicroduckV61StandUpRlCfg.run_name = "v6.1-StandUp"
 MicroduckV62StandUpRlCfg = deepcopy(MicroduckV61StandUpRlCfg)
 MicroduckV62StandUpRlCfg.experiment_name = "v6.2-StandUp"
 MicroduckV62StandUpRlCfg.run_name = "v6.2-StandUp"
+
+MicroduckV63StandUpRlCfg = deepcopy(MicroduckV62StandUpRlCfg)
+MicroduckV63StandUpRlCfg.experiment_name = "v6.3-StandUp"
+MicroduckV63StandUpRlCfg.run_name = "v6.3-StandUp"

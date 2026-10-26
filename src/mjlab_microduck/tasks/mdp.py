@@ -6144,6 +6144,13 @@ def _reset_v62_recovery_state(
     env._v62_timeout_reward_pulse[ids] = 0.0
     env._v62_hold_reward_pulse[ids] = 0.0
     env._v62_last_push_magnitude[ids] = 0.0
+    if hasattr(env, "_v63_recovery_reward_pulse"):
+        env._v63_recovery_reward_pulse[ids] = 0.0
+        env._v63_terminal_reward_pulse[ids] = 0.0
+        env._v63_hold_reward[ids] = 0.0
+        env._v63_recovery_timed_out[ids] = False
+        env._v63_hold_completed[ids] = False
+        env._v63_session_timed_out[ids] = False
 
 
 def _v62_standing_valid(
@@ -6287,6 +6294,243 @@ def v62_hold_complete(env: ManagerBasedRlEnv, **params) -> torch.Tensor:
     """Terminate successful episodes after five uninterrupted hold seconds."""
     _update_v62_recovery_state(env, **params)
     return env._v62_hold_reward_pulse != 0.0
+
+
+# v6.3 signed-pose recovery. It reuses the v6.2 episode tags and push event,
+# but replaces the farmable absolute standing rewards and sparse fixed timeout.
+_V63_RECOVERY_BASE_BONUS = 4.0
+_V63_RECOVERY_EARLY_BONUS = 6.0
+_V63_HOLD_TOTAL_BONUS = 8.0
+
+
+def _v63_state(env: ManagerBasedRlEnv) -> None:
+    """Allocate v6.3-only reward pulses alongside the shared episode state."""
+    _v62_state(env)
+    n = env.num_envs
+    if hasattr(env, "_v63_recovery_reward_pulse"):
+        return
+    env._v63_recovery_reward_pulse = torch.zeros(n, device=env.device)
+    env._v63_terminal_reward_pulse = torch.zeros(n, device=env.device)
+    env._v63_hold_reward = torch.zeros(n, device=env.device)
+    env._v63_recovery_timed_out = torch.zeros(n, device=env.device, dtype=torch.bool)
+    env._v63_hold_completed = torch.zeros(n, device=env.device, dtype=torch.bool)
+    env._v63_session_timed_out = torch.zeros(n, device=env.device, dtype=torch.bool)
+    env._v63_last_update_step = -1
+
+
+def _v63_pose_error(
+    env: ManagerBasedRlEnv,
+    feet_sensor_name: str = "feet_ground_contact",
+    head_sensor_name: str = "head_ground_contact",
+    leg_joint_indices: Optional[list] = None,
+    neck_joint_indices: Optional[list] = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return worst-dimension pose error, head-tripod mask, and near-stand mask.
+
+    Error zero is the ideal pose, one is the zero-reward acceptance boundary,
+    and values above one are increasingly wrong. Taking the maximum prevents a
+    correct height or leg pose from compensating for a bad neck or trunk tilt.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    origins = env.scene.terrain.env_origins
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - origins[:, 2], nan=0.0
+    )
+    quat = asset.data.root_link_quat_w
+    cos_tilt = 1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2)
+    tilt_deg = torch.rad2deg(torch.acos(cos_tilt.clamp(-1.0, 1.0)))
+
+    def band(error: torch.Tensor, good: float, boundary: float) -> torch.Tensor:
+        return torch.clamp((error - good) / (boundary - good), min=0.0)
+
+    e_height = band((z - 0.115).abs(), 0.005, 0.015)
+    e_tilt = band(tilt_deg, 8.0, 15.0)
+    servo_pos = _servo_joint_pos(env, asset)
+    servo_default = _servo_default_joint_pos(env, asset)
+    leg_ids = leg_joint_indices if leg_joint_indices is not None else [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]
+    neck_ids = neck_joint_indices if neck_joint_indices is not None else [5, 6, 7, 8]
+    leg_rms = torch.sqrt(
+        ((servo_pos[:, leg_ids] - servo_default[:, leg_ids]) ** 2).mean(dim=-1) + 1e-12
+    )
+    neck_error = (servo_pos[:, neck_ids] - servo_default[:, neck_ids]).abs().amax(dim=-1)
+    e_legs = band(leg_rms, 0.10, 0.25)
+    e_neck = band(torch.rad2deg(neck_error), 10.0, 30.0)
+
+    found = env.scene.sensors[feet_sensor_name].data.found
+    feet = (found.reshape(env.num_envs, 2, -1) > 0).any(dim=-1)
+    feet_any = feet.any(dim=-1)
+    feet_all = feet.all(dim=-1)
+    e_support = torch.where(
+        feet_all,
+        torch.zeros_like(z),
+        torch.where(feet_any, torch.ones_like(z), torch.full_like(z, 2.0)),
+    )
+    e_pose = torch.maximum(
+        torch.maximum(e_height, e_tilt),
+        torch.maximum(torch.maximum(e_legs, e_neck), e_support),
+    )
+    e_pose = torch.nan_to_num(e_pose, nan=4.0, posinf=4.0, neginf=4.0).clamp(0.0, 4.0)
+
+    head_contact = _sensor_any_contact(env, head_sensor_name)
+    if head_contact is None:
+        head_contact = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    near_stand = (z >= 0.08) & feet_any
+    tripod = (z >= 0.08) & feet_all & head_contact
+    return e_pose, tripod, near_stand
+
+
+def _v63_signed_pose_from_error(
+    e_pose: torch.Tensor,
+    tripod: torch.Tensor,
+    active: torch.Tensor,
+) -> torch.Tensor:
+    """Signed pose score; a near-stand head tripod is always strictly negative."""
+    positive_or_zero = 1.0 - e_pose
+    negative = -1.5 * torch.clamp(e_pose - 1.0, min=0.0, max=2.0)
+    score = torch.where(e_pose <= 1.0, positive_or_zero, negative)
+    tripod_score = -3.0 - 1.5 * torch.clamp(e_pose, max=2.0)
+    score = torch.where(tripod, tripod_score, score)
+    return torch.where(active | tripod, score, torch.zeros_like(score))
+
+
+def v63_signed_pose_reward(
+    env: ManagerBasedRlEnv,
+    **params,
+) -> torch.Tensor:
+    """Score posture only near standing/holding; floor recovery stays untaxed."""
+    _v62_state(env)
+    e_pose, tripod, near_stand = _v63_pose_error(env, **params)
+    active = near_stand | (env._v62_phase == _V62_HOLD)
+    return _v63_signed_pose_from_error(e_pose, tripod, active)
+
+
+def _v63_terminal_pose_penalty(e_pose: torch.Tensor, tripod: torch.Tensor) -> torch.Tensor:
+    """Bounded one-shot timeout cost, strictly ordered by current pose error."""
+    return -3.0 - 3.0 * e_pose - 3.0 * tripod.float()
+
+
+def _update_v63_recovery_state(
+    env: ManagerBasedRlEnv,
+    recovery_deadline_s: float = 5.0,
+    recovery_confirm_s: float = 0.4,
+    hold_s: float = 5.0,
+    session_deadline_s: float = 12.0,
+    feet_sensor_name: str = "feet_ground_contact",
+    head_sensor_name: str = "head_ground_contact",
+    leg_joint_indices: Optional[list] = None,
+    neck_joint_indices: Optional[list] = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    **standing_params,
+) -> None:
+    """Advance recovery/hold once per step and generate exact reward increments."""
+    _v63_state(env)
+    step = int(env.common_step_counter)
+    if env._v63_last_update_step == step:
+        return
+    env._v63_last_update_step = step
+    env._v63_recovery_reward_pulse.zero_()
+    env._v63_terminal_reward_pulse.zero_()
+    env._v63_hold_reward.zero_()
+    env._v63_recovery_timed_out.zero_()
+    env._v63_hold_completed.zero_()
+    env._v63_session_timed_out.zero_()
+
+    valid = _v62_standing_valid(
+        env,
+        feet_sensor_name=feet_sensor_name,
+        head_sensor_name=head_sensor_name,
+        neck_joint_indices=neck_joint_indices,
+        asset_cfg=asset_cfg,
+        **standing_params,
+    )
+    recovering = env._v62_phase == _V62_RECOVER
+    env._v62_recovery_steps[recovering] += 1
+    env._v62_valid_steps = torch.where(
+        recovering & valid,
+        env._v62_valid_steps + 1,
+        torch.where(recovering, torch.zeros_like(env._v62_valid_steps), env._v62_valid_steps),
+    )
+
+    confirm_steps = max(1, round(recovery_confirm_s / float(env.step_dt)))
+    just_recovered = recovering & (env._v62_valid_steps >= confirm_steps)
+    if just_recovered.any():
+        elapsed_s = env._v62_recovery_steps.float() * float(env.step_dt)
+        remaining = torch.clamp(1.0 - elapsed_s / recovery_deadline_s, 0.0, 1.0)
+        env._v63_recovery_reward_pulse[just_recovered] = (
+            _V63_RECOVERY_BASE_BONUS + _V63_RECOVERY_EARLY_BONUS * remaining[just_recovered] ** 2
+        )
+        env._v62_phase[just_recovered] = _V62_HOLD
+        env._v62_hold_steps[just_recovered] = 0
+
+    e_pose, tripod, _ = _v63_pose_error(
+        env,
+        feet_sensor_name=feet_sensor_name,
+        head_sensor_name=head_sensor_name,
+        leg_joint_indices=leg_joint_indices,
+        neck_joint_indices=neck_joint_indices,
+        asset_cfg=asset_cfg,
+    )
+    deadline_steps = max(1, round(recovery_deadline_s / float(env.step_dt)))
+    recovery_timeout = (
+        (env._v62_phase == _V62_RECOVER)
+        & (env._v62_recovery_steps >= deadline_steps)
+    )
+    env._v63_terminal_reward_pulse[recovery_timeout] = _v63_terminal_pose_penalty(
+        e_pose[recovery_timeout], tripod[recovery_timeout]
+    )
+    env._v63_recovery_timed_out[recovery_timeout] = True
+    env._v62_phase[recovery_timeout] = _V62_FAILED
+
+    holding = (env._v62_phase == _V62_HOLD) & ~just_recovered
+    env._v62_hold_steps = torch.where(
+        holding & valid,
+        env._v62_hold_steps + 1,
+        torch.where(holding, torch.zeros_like(env._v62_hold_steps), env._v62_hold_steps),
+    )
+    # RewardManager multiplies by dt, so this rate pays exactly 8 over 5 seconds.
+    env._v63_hold_reward[holding & valid] = _V63_HOLD_TOTAL_BONUS / hold_s
+    hold_steps = max(1, round(hold_s / float(env.step_dt)))
+    completed = holding & (env._v62_hold_steps >= hold_steps)
+    env._v63_hold_completed[completed] = True
+    env._v62_phase[completed] = _V62_COMPLETE
+
+    episode_length = getattr(env, "episode_length_buf", None)
+    if episode_length is None:
+        episode_length = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
+    session_steps = max(1, round(session_deadline_s / float(env.step_dt)))
+    session_timeout = (
+        (episode_length >= session_steps)
+        & (env._v62_phase != _V62_COMPLETE)
+        & (env._v62_phase != _V62_FAILED)
+    )
+    env._v63_terminal_reward_pulse[session_timeout] = _v63_terminal_pose_penalty(
+        e_pose[session_timeout], tripod[session_timeout]
+    )
+    env._v63_session_timed_out[session_timeout] = True
+    env._v62_phase[session_timeout] = _V62_FAILED
+
+
+def v63_recovery_reward(env: ManagerBasedRlEnv, **params) -> torch.Tensor:
+    """Nonlinear early-recovery bonus plus linear per-step hold increments."""
+    _update_v63_recovery_state(env, **params)
+    one_shots = env._v63_recovery_reward_pulse + env._v63_terminal_reward_pulse
+    return one_shots / float(env.step_dt) + env._v63_hold_reward
+
+
+def v63_recovery_timeout(env: ManagerBasedRlEnv, **params) -> torch.Tensor:
+    _update_v63_recovery_state(env, **params)
+    return env._v63_recovery_timed_out
+
+
+def v63_hold_complete(env: ManagerBasedRlEnv, **params) -> torch.Tensor:
+    _update_v63_recovery_state(env, **params)
+    return env._v63_hold_completed
+
+
+def v63_session_timeout(env: ManagerBasedRlEnv, **params) -> torch.Tensor:
+    _update_v63_recovery_state(env, **params)
+    return env._v63_session_timed_out
 
 
 def head_ground_contact_near_standing(
