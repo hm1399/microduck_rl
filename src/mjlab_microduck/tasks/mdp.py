@@ -646,6 +646,16 @@ def height_progress(
     return delta
 
 
+def v63_upright_progress_reward(env: ManagerBasedRlEnv, **params) -> torch.Tensor:
+    """Return Δcos(tilt)/dt so RewardManager's dt does not shrink the potential."""
+    return upright_progress(env, **params) / float(env.step_dt)
+
+
+def v63_height_progress_reward(env: ManagerBasedRlEnv, **params) -> torch.Tensor:
+    """Return Δheight/dt so a full rise retains its intended reward mass."""
+    return height_progress(env, **params) / float(env.step_dt)
+
+
 def fallen_state_penalty(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -6324,6 +6334,8 @@ def _v63_pose_error(
     head_sensor_name: str = "head_ground_contact",
     leg_joint_indices: Optional[list] = None,
     neck_joint_indices: Optional[list] = None,
+    tripod_height_min: float = 0.08,
+    tripod_tilt_max_deg: float = 60.0,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return worst-dimension pose error, head-tripod mask, and near-stand mask.
@@ -6376,7 +6388,12 @@ def _v63_pose_error(
     if head_contact is None:
         head_contact = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
     near_stand = (z >= 0.08) & feet_any
-    tripod = (z >= 0.08) & feet_all & head_contact
+    tripod = (
+        (z >= tripod_height_min)
+        & (tilt_deg <= tripod_tilt_max_deg)
+        & feet_all
+        & head_contact
+    )
     return e_pose, tripod, near_stand
 
 
@@ -6420,6 +6437,8 @@ def _update_v63_recovery_state(
     head_sensor_name: str = "head_ground_contact",
     leg_joint_indices: Optional[list] = None,
     neck_joint_indices: Optional[list] = None,
+    tripod_height_min: float = 0.08,
+    tripod_tilt_max_deg: float = 60.0,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     **standing_params,
 ) -> None:
@@ -6469,6 +6488,8 @@ def _update_v63_recovery_state(
         head_sensor_name=head_sensor_name,
         leg_joint_indices=leg_joint_indices,
         neck_joint_indices=neck_joint_indices,
+        tripod_height_min=tripod_height_min,
+        tripod_tilt_max_deg=tripod_tilt_max_deg,
         asset_cfg=asset_cfg,
     )
     deadline_steps = max(1, round(recovery_deadline_s / float(env.step_dt)))

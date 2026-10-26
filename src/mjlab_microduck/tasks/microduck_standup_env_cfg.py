@@ -1557,6 +1557,29 @@ def make_microduck_v63_standup_env_cfg(
     return cfg
 
 
+def make_microduck_v631_standup_env_cfg(
+    play: bool = False,
+    rough: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """v6.3.1: cover the observed low tripod and preserve potential reward mass."""
+    cfg = make_microduck_v63_standup_env_cfg(play=play, rough=rough)
+    cfg.rewards["upright_progress"].func = microduck_mdp.v63_upright_progress_reward
+    cfg.rewards["height_progress"].func = microduck_mdp.v63_height_progress_reward
+
+    # v6.3 short-run replay produced z≈0.068 m / tilt≈43° head tripods,
+    # which bypassed the old 0.08 m gate in all 17 cases. The tilt ceiling
+    # still excludes roughly 90° prone recovery contact from this penalty.
+    for name in ["v63_signed_pose", "v63_recovery"]:
+        cfg.rewards[name].params.update(
+            {"tripod_height_min": 0.055, "tripod_tilt_max_deg": 60.0}
+        )
+    for name in ["v63_recovery_timeout", "v63_hold_complete", "v63_session_timeout"]:
+        cfg.terminations[name].params.update(
+            {"tripod_height_min": 0.055, "tripod_tilt_max_deg": 60.0}
+        )
+    return cfg
+
+
 # ── RL runner config ──────────────────────────────────────────────────────────
 
 MicroduckStandUpRlCfg = RslRlOnPolicyRunnerCfg(
@@ -1613,3 +1636,7 @@ MicroduckV62StandUpRlCfg.run_name = "v6.2-StandUp"
 MicroduckV63StandUpRlCfg = deepcopy(MicroduckV62StandUpRlCfg)
 MicroduckV63StandUpRlCfg.experiment_name = "v6.3-StandUp"
 MicroduckV63StandUpRlCfg.run_name = "v6.3-StandUp"
+
+MicroduckV631StandUpRlCfg = deepcopy(MicroduckV63StandUpRlCfg)
+MicroduckV631StandUpRlCfg.experiment_name = "v6.3.1-StandUp"
+MicroduckV631StandUpRlCfg.run_name = "v6.3.1-StandUp"

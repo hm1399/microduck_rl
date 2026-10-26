@@ -205,3 +205,37 @@ def test_hold_session_deadline_penalizes_current_tripod_not_before_twelve_second
     terminal += _step_reward(env)[0].item()
     assert env._v63_session_timed_out[0]
     assert terminal == -18.0
+
+
+def test_v631_observed_low_tripod_is_penalized_but_prone_contact_is_not():
+    env = _Env(n=2)
+    for env_id in range(2):
+        _set_valid(env, env_id, True)
+        env.scene.asset.data.root_link_pos_w[env_id, 2] = 0.06824
+        env.scene.asset.data.joint_pos[env_id, 5] = math.radians(55.662)
+        env.scene.sensors["head_ground_contact"].data.found[env_id] = 1.0
+    _set_tilt(env, 0, 43.153)
+    _set_tilt(env, 1, 90.0)
+    params = {"tripod_height_min": 0.055, "tripod_tilt_max_deg": 60.0}
+
+    # The old 0.08 m gate misses this exact observed failure geometry.
+    assert mdp.v63_signed_pose_reward(env)[0].item() == 0.0
+    score = mdp.v63_signed_pose_reward(env, **params)
+    assert score[0].item() == -6.0
+    assert score[1].item() == 0.0
+
+
+def test_v631_potential_wrappers_cancel_reward_manager_dt():
+    env = _Env()
+    _set_valid(env, 0, True)
+    env.episode_length_buf[0] = 2
+    assert mdp.v63_upright_progress_reward(env)[0].item() == 0.0
+    _set_tilt(env, 0, 90.0)
+    upright = mdp.v63_upright_progress_reward(env)[0].item() * env.step_dt
+    assert math.isclose(upright, -1.0, rel_tol=1e-5)
+
+    env.scene.asset.data.root_link_pos_w[0, 2] = 0.04
+    assert mdp.v63_height_progress_reward(env)[0].item() == 0.0
+    env.scene.asset.data.root_link_pos_w[0, 2] = 0.115
+    height = mdp.v63_height_progress_reward(env)[0].item() * env.step_dt
+    assert math.isclose(height, 0.075, rel_tol=1e-5)
