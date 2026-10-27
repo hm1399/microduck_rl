@@ -6220,6 +6220,22 @@ def _v62_standing_valid(
     )
 
 
+def v4_stand_valid_reward(env: ManagerBasedRlEnv, **params) -> torch.Tensor:
+    """Strict standing fraction for the dedicated upright-only v4-stand task."""
+    return _v62_standing_valid(env, **params).float()
+
+
+def v4_stand_head_contact_cost(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "head_ground_contact",
+) -> torch.Tensor:
+    """Ungated head-ground cost; v4-stand has no floor-recovery phase."""
+    contact = _sensor_any_contact(env, sensor_name)
+    if contact is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return contact.float()
+
+
 def _update_v62_recovery_state(
     env: ManagerBasedRlEnv,
     recovery_deadline_s: float = 5.0,

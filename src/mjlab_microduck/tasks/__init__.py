@@ -27,6 +27,10 @@ from .microduck_velocity_env_cfg import (
     make_microduck_velocity_env_cfg,
     MicroduckRlCfg,
 )
+from .microduck_stand_env_cfg import (
+    make_microduck_v4_stand_env_cfg,
+    MicroduckV4StandRlCfg,
+)
 from .microduck_standup_env_cfg import (
     make_microduck_standup_env_cfg,
     make_microduck_v6_standup_env_cfg,
@@ -131,6 +135,15 @@ register_mjlab_task(
     env_cfg=make_microduck_velstand_env_cfg(rough=True),
     play_env_cfg=make_microduck_velstand_env_cfg(play=True, rough=True),
     rl_cfg=MicroduckVelStandRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# v4-stand — dedicated zero-command standing base, not fall recovery.
+register_mjlab_task(
+    task_id="v4-stand",
+    env_cfg=make_microduck_v4_stand_env_cfg(),
+    play_env_cfg=make_microduck_v4_stand_env_cfg(play=True),
+    rl_cfg=MicroduckV4StandRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
