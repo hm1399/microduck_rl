@@ -33,3 +33,36 @@ def test_v64_keeps_v631_reward_fixes_and_has_distinct_registration():
     assert "v6.4-StandUp-Rough" in list_tasks()
     assert MicroduckV64StandUpRlCfg.experiment_name == "v6.4-StandUp"
     assert MicroduckV64StandUpRlCfg.run_name == "v6.4-StandUp"
+
+
+def test_v64_actor_only_warm_start_resets_incompatible_critic(monkeypatch):
+    from mjlab.rl.runner import MjlabOnPolicyRunner
+    from mjlab_microduck.tasks import mdp
+
+    seen = {}
+    monkeypatch.setattr(
+        mdp,
+        "_orig_runner_load",
+        lambda self, path, *args, **kwargs: seen.update(kwargs) or {},
+    )
+    monkeypatch.setenv(mdp.WARM_START_ENV, "1")
+    monkeypatch.setenv(mdp.ACTOR_ONLY_WARM_START_ENV, "1")
+
+    class _Unwrapped:
+        common_step_counter = 90024
+
+    class _Env:
+        unwrapped = _Unwrapped()
+
+    class _Runner:
+        env = _Env()
+        current_learning_iteration = 1999
+
+    runner = _Runner()
+    MjlabOnPolicyRunner.load(runner, "model_1999.pt")
+    assert seen["load_cfg"] == {
+        "actor": True, "critic": False, "optimizer": False,
+        "iteration": False, "rnd": False,
+    }
+    assert runner.env.unwrapped.common_step_counter == 0
+    assert runner.current_learning_iteration == 0

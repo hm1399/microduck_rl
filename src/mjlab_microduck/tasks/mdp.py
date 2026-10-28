@@ -122,6 +122,7 @@ print("[mdp] Patch 4 active: ONNX export filters passive_* joints")
 # With MICRODUCK_WARM_START=1 the counters restart at 0 after loading (weights,
 # normalizers and optimizer are kept). Forwarded into HF Jobs by hf_jobs.py.
 WARM_START_ENV = "MICRODUCK_WARM_START"
+ACTOR_ONLY_WARM_START_ENV = "MICRODUCK_ACTOR_ONLY_WARM_START"
 
 try:
     from mjlab.rl.runner import MjlabOnPolicyRunner as _MjlabRunner  # noqa: E402
@@ -129,6 +130,18 @@ try:
     _orig_runner_load = _MjlabRunner.load
 
     def _load_with_warm_start(self, path, *args, **kwargs):
+        actor_only = os.environ.get(ACTOR_ONLY_WARM_START_ENV, "") not in ("", "0")
+        if actor_only and not args and kwargs.get("load_cfg") is None:
+            # Cross-task critics may have different privileged observation shapes.
+            # Keep the compatible actor/normalizer; reset critic, optimizer and iteration.
+            kwargs["load_cfg"] = {
+                "actor": True,
+                "critic": False,
+                "optimizer": False,
+                "iteration": False,
+                "rnd": False,
+            }
+            print("[mdp] Patch 5: ACTOR-ONLY warm start (critic/optimizer reset)")
         infos = _orig_runner_load(self, path, *args, **kwargs)
         if os.environ.get(WARM_START_ENV, "") not in ("", "0"):
             restored = self.env.unwrapped.common_step_counter
