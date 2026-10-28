@@ -74,6 +74,48 @@ V62_PUSH_MAGNITUDE_STAGES = [
     {"step": 3000 * 24, "magnitude_range": (0.20, 0.40)},
 ]
 
+# v6.4 warm-starts from v4-stand: preserve a large standing fraction while
+# gradually introducing ground recovery. Unlike v6.3, hard SO(3)/random-joint
+# resets and face-up-dominated mixes are not presented from iteration zero.
+V64_GROUND_STATE_STAGES = [
+    {
+        "step": 0,
+        "params": {
+            "standing_prob": 0.60, "sitting_prob": 0.20, "prone_prob": 0.20,
+            "face_down_prob": 1.00, "side_prob": 0.0, "so3_prob": 0.0,
+            "joint_random_prob": 0.0, "sitting_joint_noise_std": 0.05,
+            "standing_joint_noise_std": 0.03, "sitting_tilt_max": 0.0,
+        },
+    },
+    {
+        "step": 500 * 24,
+        "params": {
+            "standing_prob": 0.45, "sitting_prob": 0.20, "prone_prob": 0.35,
+            "face_down_prob": 0.80, "side_prob": 0.10, "so3_prob": 0.05,
+            "joint_random_prob": 0.10, "sitting_joint_noise_std": 0.08,
+            "standing_joint_noise_std": 0.05, "sitting_tilt_max": math.radians(5),
+        },
+    },
+    {
+        "step": 1500 * 24,
+        "params": {
+            "standing_prob": 0.30, "sitting_prob": 0.20, "prone_prob": 0.50,
+            "face_down_prob": 0.65, "side_prob": 0.15, "so3_prob": 0.15,
+            "joint_random_prob": 0.35, "sitting_joint_noise_std": 0.12,
+            "standing_joint_noise_std": 0.08, "sitting_tilt_max": math.radians(10),
+        },
+    },
+    {
+        "step": 3000 * 24,
+        "params": {
+            "standing_prob": 0.20, "sitting_prob": 0.20, "prone_prob": 0.60,
+            "face_down_prob": 0.50, "side_prob": 0.25, "so3_prob": 0.30,
+            "joint_random_prob": 0.60, "sitting_joint_noise_std": 0.16,
+            "standing_joint_noise_std": 0.12, "sitting_tilt_max": math.radians(15),
+        },
+    },
+]
+
 # ── Sitting source pose (asset.data.joint_pos index → angle in rad) ───────────
 # Must match the *actual end-state* of the sit policy. Mirrors the sit env's
 # SITTING_TARGET_OVERRIDES (microduck_sit_env_cfg.py) — the swept stable
@@ -1580,6 +1622,21 @@ def make_microduck_v631_standup_env_cfg(
     return cfg
 
 
+def make_microduck_v64_standup_env_cfg(
+    play: bool = False,
+    rough: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """v6.4: v4-stand warm-start recovery with standing-preserving curricula."""
+    cfg = make_microduck_v631_standup_env_cfg(play=play, rough=rough)
+    cfg.events["set_ground_state"].params.update(
+        deepcopy(V64_GROUND_STATE_STAGES[0]["params"])
+    )
+    cfg.curriculum["ground_state_mix"].params["param_stages"] = deepcopy(
+        V64_GROUND_STATE_STAGES
+    )
+    return cfg
+
+
 # ── RL runner config ──────────────────────────────────────────────────────────
 
 MicroduckStandUpRlCfg = RslRlOnPolicyRunnerCfg(
@@ -1640,3 +1697,7 @@ MicroduckV63StandUpRlCfg.run_name = "v6.3-StandUp"
 MicroduckV631StandUpRlCfg = deepcopy(MicroduckV63StandUpRlCfg)
 MicroduckV631StandUpRlCfg.experiment_name = "v6.3.1-StandUp"
 MicroduckV631StandUpRlCfg.run_name = "v6.3.1-StandUp"
+
+MicroduckV64StandUpRlCfg = deepcopy(MicroduckV631StandUpRlCfg)
+MicroduckV64StandUpRlCfg.experiment_name = "v6.4-StandUp"
+MicroduckV64StandUpRlCfg.run_name = "v6.4-StandUp"
