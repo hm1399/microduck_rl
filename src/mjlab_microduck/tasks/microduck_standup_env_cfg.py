@@ -116,6 +116,62 @@ V64_GROUND_STATE_STAGES = [
     },
 ]
 
+# v6.5 targets arbitrary grounded orientations, not just four canonical poses.
+# Every stage already includes face-up and side falls; uniform SO(3) and random
+# servo configurations expand gradually while preserving standing experience.
+V65_GROUND_STATE_STAGES = [
+    {
+        "step": 0,
+        "params": {
+            "standing_prob": 0.40, "sitting_prob": 0.10, "prone_prob": 0.50,
+            "face_down_prob": 0.50, "side_prob": 0.30, "so3_prob": 0.10,
+            "joint_random_prob": 0.05, "joint_range_frac": 0.50,
+            "sitting_joint_noise_std": 0.05, "standing_joint_noise_std": 0.03,
+            "sitting_tilt_max": 0.0,
+        },
+    },
+    {
+        "step": 250 * 24,
+        "params": {
+            "standing_prob": 0.30, "sitting_prob": 0.10, "prone_prob": 0.60,
+            "face_down_prob": 0.40, "side_prob": 0.30, "so3_prob": 0.30,
+            "joint_random_prob": 0.20, "joint_range_frac": 0.65,
+            "sitting_joint_noise_std": 0.08, "standing_joint_noise_std": 0.05,
+            "sitting_tilt_max": math.radians(5),
+        },
+    },
+    {
+        "step": 500 * 24,
+        "params": {
+            "standing_prob": 0.20, "sitting_prob": 0.10, "prone_prob": 0.70,
+            "face_down_prob": 0.35, "side_prob": 0.30, "so3_prob": 0.60,
+            "joint_random_prob": 0.50, "joint_range_frac": 0.80,
+            "sitting_joint_noise_std": 0.12, "standing_joint_noise_std": 0.08,
+            "sitting_tilt_max": math.radians(10),
+        },
+    },
+    {
+        "step": 1500 * 24,
+        "params": {
+            "standing_prob": 0.15, "sitting_prob": 0.10, "prone_prob": 0.75,
+            "face_down_prob": 0.33, "side_prob": 0.33, "so3_prob": 0.85,
+            "joint_random_prob": 0.75, "joint_range_frac": 0.90,
+            "sitting_joint_noise_std": 0.16, "standing_joint_noise_std": 0.12,
+            "sitting_tilt_max": math.radians(15),
+        },
+    },
+    {
+        "step": 3000 * 24,
+        "params": {
+            "standing_prob": 0.10, "sitting_prob": 0.10, "prone_prob": 0.80,
+            "face_down_prob": 0.34, "side_prob": 0.33, "so3_prob": 1.0,
+            "joint_random_prob": 0.90, "joint_range_frac": 1.0,
+            "sitting_joint_noise_std": 0.20, "standing_joint_noise_std": 0.15,
+            "sitting_tilt_max": math.radians(15),
+        },
+    },
+]
+
 # ── Sitting source pose (asset.data.joint_pos index → angle in rad) ───────────
 # Must match the *actual end-state* of the sit policy. Mirrors the sit env's
 # SITTING_TARGET_OVERRIDES (microduck_sit_env_cfg.py) — the swept stable
@@ -1637,6 +1693,21 @@ def make_microduck_v64_standup_env_cfg(
     return cfg
 
 
+def make_microduck_v65_standup_env_cfg(
+    play: bool = False,
+    rough: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """v6.5: arbitrary grounded SO(3) and joint-limit recovery curriculum."""
+    cfg = make_microduck_v64_standup_env_cfg(play=play, rough=rough)
+    cfg.events["set_ground_state"].params.update(
+        deepcopy(V65_GROUND_STATE_STAGES[0]["params"])
+    )
+    cfg.curriculum["ground_state_mix"].params["param_stages"] = deepcopy(
+        V65_GROUND_STATE_STAGES
+    )
+    return cfg
+
+
 # ── RL runner config ──────────────────────────────────────────────────────────
 
 MicroduckStandUpRlCfg = RslRlOnPolicyRunnerCfg(
@@ -1701,3 +1772,7 @@ MicroduckV631StandUpRlCfg.run_name = "v6.3.1-StandUp"
 MicroduckV64StandUpRlCfg = deepcopy(MicroduckV631StandUpRlCfg)
 MicroduckV64StandUpRlCfg.experiment_name = "v6.4-StandUp"
 MicroduckV64StandUpRlCfg.run_name = "v6.4-StandUp"
+
+MicroduckV65StandUpRlCfg = deepcopy(MicroduckV64StandUpRlCfg)
+MicroduckV65StandUpRlCfg.experiment_name = "v6.5-StandUp"
+MicroduckV65StandUpRlCfg.run_name = "v6.5-StandUp"

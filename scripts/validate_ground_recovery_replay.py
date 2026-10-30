@@ -12,6 +12,8 @@ import json
 import math
 from pathlib import Path
 
+import numpy as np
+
 from validate_standup_replay import CONTROL_DT, MICRODUCK_XML, StandupReplay
 
 
@@ -23,10 +25,17 @@ CASES = {
 }
 
 
-def run_case(replay: StandupReplay, quat: tuple[float, float, float, float]) -> dict:
+def run_case(
+    replay: StandupReplay,
+    quat: tuple[float, float, float, float],
+    joint_angles: np.ndarray | None = None,
+) -> dict:
     replay.reset()
     replay.data.qpos[replay.trunk_qpos_adr + 2] = 0.08
     replay.data.qpos[replay.trunk_qpos_adr + 3 : replay.trunk_qpos_adr + 7] = quat
+    if joint_angles is not None:
+        for index, qpos_idx in enumerate(replay.policy.joint_qpos_indices):
+            replay.data.qpos[qpos_idx] = joint_angles[index]
     replay.data.qvel[:] = 0.0
     import mujoco
     mujoco.mj_forward(replay.model, replay.data)
@@ -68,7 +77,12 @@ def main() -> int:
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--scene", type=Path, default=Path(MICRODUCK_XML))
     parser.add_argument("--json", type=Path, default=None)
+    parser.add_argument("--random-cases", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--random-joints", action="store_true")
     args = parser.parse_args()
+    if args.random_cases < 0:
+        raise SystemExit("random-cases must be >= 0")
     replay = StandupReplay(
         policy_path=args.policy,
         scene_path=args.scene,
@@ -81,9 +95,24 @@ def main() -> int:
         hold_s=5.0,
         push_speed=0.0,
     )
+    cases = [(name, (quat, None)) for name, quat in CASES.items()]
+    rng = np.random.default_rng(args.seed)
+    for index in range(args.random_cases):
+        quat = rng.normal(size=4)
+        quat /= np.linalg.norm(quat)
+        joint_angles = None
+        if args.random_joints:
+            joint_angles = replay.policy.default_pose.copy()
+            for joint_index, qpos_idx in enumerate(replay.policy.joint_qpos_indices):
+                joint_id = int(replay.model.actuator_trnid[joint_index, 0])
+                low, high = replay.model.jnt_range[joint_id]
+                if np.isfinite(low) and np.isfinite(high):
+                    joint_angles[joint_index] = rng.uniform(low, high)
+        cases.append((f"so3_{index:03d}", (tuple(float(x) for x in quat), joint_angles)))
+
     results = {}
-    for name, quat in CASES.items():
-        result = run_case(replay, quat)
+    for name, (quat, joint_angles) in cases:
+        result = run_case(replay, quat, joint_angles=joint_angles)
         results[name] = result
         print(
             f"{'PASS' if result['pass'] else 'FAIL':4} {name:12} "
@@ -94,6 +123,9 @@ def main() -> int:
         )
     payload = {
         "policy": str(args.policy),
+        "seed": args.seed,
+        "random_cases": args.random_cases,
+        "random_joints": args.random_joints,
         "cases": results,
         "passed": sum(bool(result["pass"]) for result in results.values()),
         "total": len(results),

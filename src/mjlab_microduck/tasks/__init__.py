@@ -39,6 +39,7 @@ from .microduck_standup_env_cfg import (
     make_microduck_v63_standup_env_cfg,
     make_microduck_v631_standup_env_cfg,
     make_microduck_v64_standup_env_cfg,
+    make_microduck_v65_standup_env_cfg,
     MicroduckStandUpRlCfg,
     MicroduckV6StandUpRlCfg,
     MicroduckV61StandUpRlCfg,
@@ -46,6 +47,7 @@ from .microduck_standup_env_cfg import (
     MicroduckV63StandUpRlCfg,
     MicroduckV631StandUpRlCfg,
     MicroduckV64StandUpRlCfg,
+    MicroduckV65StandUpRlCfg,
 )
 from .microduck_velstand_env_cfg import (
     make_microduck_velstand_env_cfg,
@@ -252,6 +254,22 @@ register_mjlab_task(
     env_cfg=make_microduck_v64_standup_env_cfg(rough=True),
     play_env_cfg=make_microduck_v64_standup_env_cfg(play=True, rough=True),
     rl_cfg=MicroduckV64StandUpRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="v6.5-StandUp",
+    env_cfg=make_microduck_v65_standup_env_cfg(),
+    play_env_cfg=make_microduck_v65_standup_env_cfg(play=True),
+    rl_cfg=MicroduckV65StandUpRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="v6.5-StandUp-Rough",
+    env_cfg=make_microduck_v65_standup_env_cfg(rough=True),
+    play_env_cfg=make_microduck_v65_standup_env_cfg(play=True, rough=True),
+    rl_cfg=MicroduckV65StandUpRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
