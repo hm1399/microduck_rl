@@ -4354,6 +4354,8 @@ def set_random_prone_orientation(
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     face_down_prob: float = 0.5,
     side_prob: float = 0.0,
+    tilt_min_deg: float = 90.0,
+    tilt_max_deg: float | None = None,
 ):
     """Randomly initialize each env lying down, with random yaw.
 
@@ -4377,15 +4379,23 @@ def set_random_prone_orientation(
     env_ids = env_ids.to(env.device, dtype=torch.int)
     num = len(env_ids)
 
+    if tilt_max_deg is None:
+        tilt_max_deg = tilt_min_deg
+    if not (0.0 <= tilt_min_deg <= tilt_max_deg <= 180.0):
+        raise ValueError(f"invalid prone tilt range: {tilt_min_deg}..{tilt_max_deg}")
+    tilt = math.radians(tilt_min_deg) + torch.rand(num, device=env.device) * math.radians(
+        tilt_max_deg - tilt_min_deg
+    )
+    ct = torch.cos(tilt * 0.5)
+    st = torch.sin(tilt * 0.5)
     yaw = torch.rand(num, device=env.device) * 2 * np.pi - np.pi
     cy = torch.cos(yaw * 0.5)
     sy = torch.sin(yaw * 0.5)
-    s = 2.0 ** -0.5  # sqrt(2)/2
 
-    face_down = torch.stack([ s * cy, -s * sy,  s * cy,  s * sy], dim=1)
-    face_up   = torch.stack([ s * cy,  s * sy, -s * cy,  s * sy], dim=1)
+    face_down = torch.stack([ct * cy, -st * sy, st * cy, ct * sy], dim=1)
+    face_up   = torch.stack([ct * cy,  st * sy, -st * cy, ct * sy], dim=1)
     sign = torch.where(torch.rand(num, device=env.device) < 0.5, 1.0, -1.0)
-    on_side  = torch.stack([ s * cy, sign * s * cy, sign * s * sy, s * sy], dim=1)
+    on_side  = torch.stack([ct * cy, sign * st * cy, sign * st * sy, ct * sy], dim=1)
 
     u = torch.rand(num, device=env.device)
     side_mask = u < side_prob
@@ -4598,6 +4608,10 @@ def set_random_v6_standup_state(
     sitting_joint_noise_std: float = 0.12,
     standing_joint_noise_std: float = 0.08,
     sitting_tilt_max: float = 0.0,
+    tilt_min_deg: float = 90.0,
+    tilt_max_deg: float | None = None,
+    tilt_aware_z: bool = False,
+    upright_z: float = 0.115,
     track_v62_episode_type: bool = False,
 ):
     """Reset v6 into varied upright, sitting, and fallen states.
@@ -4664,6 +4678,8 @@ def set_random_v6_standup_state(
         asset_cfg=asset_cfg,
         face_down_prob=face_down_prob,
         side_prob=side_prob,
+        tilt_min_deg=tilt_min_deg,
+        tilt_max_deg=tilt_max_deg,
     )
 
     z = torch.rand(len(prone_ids), device=env.device) * (prone_z_max - prone_z_min) + prone_z_min
@@ -4674,6 +4690,12 @@ def set_random_v6_standup_state(
         so3_ids = prone_ids[so3_mask]
         env.sim.data.qpos[so3_ids, 3:7] = _uniform_random_quat(len(so3_ids), env.device)
         env.sim.data.qpos[so3_ids, 2] += so3_extra_z
+
+    if tilt_aware_z:
+        quat = env.sim.data.qpos[prone_ids, 3:7]
+        cos_tilt = (1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2)).clamp(0.0, 1.0)
+        z_tilt = z + (upright_z - z) * cos_tilt
+        env.sim.data.qpos[prone_ids, 2] = z_tilt + _env_origin_z(env, prone_ids)
 
     joint_mask = (torch.rand(len(prone_ids), device=env.device) < joint_random_prob) | so3_mask
     if joint_mask.any():

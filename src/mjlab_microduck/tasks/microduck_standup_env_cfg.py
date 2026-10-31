@@ -172,6 +172,78 @@ V65_GROUND_STATE_STAGES = [
     },
 ]
 
+# v6.6 reverse curriculum: the maximum fall angle grows, but every later stage
+# keeps the complete earlier 5°..max range. Standing and old recovery states are
+# therefore rehearsed rather than replaced when new difficulty is introduced.
+V66_GROUND_STATE_STAGES = [
+    {
+        "step": 0,
+        "params": {
+            "standing_prob": 0.50, "sitting_prob": 0.10, "prone_prob": 0.40,
+            "face_down_prob": 0.34, "side_prob": 0.33,
+            "tilt_min_deg": 5.0, "tilt_max_deg": 15.0, "tilt_aware_z": True,
+            "so3_prob": 0.0, "joint_random_prob": 0.0, "joint_range_frac": 0.50,
+            "sitting_joint_noise_std": 0.05, "standing_joint_noise_std": 0.03,
+            "sitting_tilt_max": 0.0,
+        },
+    },
+    {
+        "step": 250 * 24,
+        "params": {
+            "standing_prob": 0.40, "sitting_prob": 0.10, "prone_prob": 0.50,
+            "face_down_prob": 0.34, "side_prob": 0.33,
+            "tilt_min_deg": 5.0, "tilt_max_deg": 30.0, "tilt_aware_z": True,
+            "so3_prob": 0.0, "joint_random_prob": 0.05, "joint_range_frac": 0.60,
+            "sitting_joint_noise_std": 0.06, "standing_joint_noise_std": 0.04,
+            "sitting_tilt_max": math.radians(3),
+        },
+    },
+    {
+        "step": 500 * 24,
+        "params": {
+            "standing_prob": 0.30, "sitting_prob": 0.10, "prone_prob": 0.60,
+            "face_down_prob": 0.34, "side_prob": 0.33,
+            "tilt_min_deg": 5.0, "tilt_max_deg": 60.0, "tilt_aware_z": True,
+            "so3_prob": 0.05, "joint_random_prob": 0.10, "joint_range_frac": 0.70,
+            "sitting_joint_noise_std": 0.08, "standing_joint_noise_std": 0.05,
+            "sitting_tilt_max": math.radians(5),
+        },
+    },
+    {
+        "step": 1000 * 24,
+        "params": {
+            "standing_prob": 0.20, "sitting_prob": 0.10, "prone_prob": 0.70,
+            "face_down_prob": 0.34, "side_prob": 0.33,
+            "tilt_min_deg": 5.0, "tilt_max_deg": 90.0, "tilt_aware_z": True,
+            "so3_prob": 0.15, "joint_random_prob": 0.25, "joint_range_frac": 0.80,
+            "sitting_joint_noise_std": 0.10, "standing_joint_noise_std": 0.08,
+            "sitting_tilt_max": math.radians(8),
+        },
+    },
+    {
+        "step": 2000 * 24,
+        "params": {
+            "standing_prob": 0.15, "sitting_prob": 0.10, "prone_prob": 0.75,
+            "face_down_prob": 0.34, "side_prob": 0.33,
+            "tilt_min_deg": 5.0, "tilt_max_deg": 90.0, "tilt_aware_z": True,
+            "so3_prob": 0.40, "joint_random_prob": 0.50, "joint_range_frac": 0.90,
+            "sitting_joint_noise_std": 0.14, "standing_joint_noise_std": 0.10,
+            "sitting_tilt_max": math.radians(12),
+        },
+    },
+    {
+        "step": 4000 * 24,
+        "params": {
+            "standing_prob": 0.10, "sitting_prob": 0.10, "prone_prob": 0.80,
+            "face_down_prob": 0.34, "side_prob": 0.33,
+            "tilt_min_deg": 5.0, "tilt_max_deg": 90.0, "tilt_aware_z": True,
+            "so3_prob": 1.0, "joint_random_prob": 0.90, "joint_range_frac": 1.0,
+            "sitting_joint_noise_std": 0.20, "standing_joint_noise_std": 0.15,
+            "sitting_tilt_max": math.radians(15),
+        },
+    },
+]
+
 # ── Sitting source pose (asset.data.joint_pos index → angle in rad) ───────────
 # Must match the *actual end-state* of the sit policy. Mirrors the sit env's
 # SITTING_TARGET_OVERRIDES (microduck_sit_env_cfg.py) — the swept stable
@@ -1708,6 +1780,21 @@ def make_microduck_v65_standup_env_cfg(
     return cfg
 
 
+def make_microduck_v66_standup_env_cfg(
+    play: bool = False,
+    rough: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """v6.6: near-fall reverse curriculum with rehearsal of every old angle."""
+    cfg = make_microduck_v65_standup_env_cfg(play=play, rough=rough)
+    cfg.events["set_ground_state"].params.update(
+        deepcopy(V66_GROUND_STATE_STAGES[0]["params"])
+    )
+    cfg.curriculum["ground_state_mix"].params["param_stages"] = deepcopy(
+        V66_GROUND_STATE_STAGES
+    )
+    return cfg
+
+
 # ── RL runner config ──────────────────────────────────────────────────────────
 
 MicroduckStandUpRlCfg = RslRlOnPolicyRunnerCfg(
@@ -1776,3 +1863,7 @@ MicroduckV64StandUpRlCfg.run_name = "v6.4-StandUp"
 MicroduckV65StandUpRlCfg = deepcopy(MicroduckV64StandUpRlCfg)
 MicroduckV65StandUpRlCfg.experiment_name = "v6.5-StandUp"
 MicroduckV65StandUpRlCfg.run_name = "v6.5-StandUp"
+
+MicroduckV66StandUpRlCfg = deepcopy(MicroduckV65StandUpRlCfg)
+MicroduckV66StandUpRlCfg.experiment_name = "v6.6-StandUp"
+MicroduckV66StandUpRlCfg.run_name = "v6.6-StandUp"
