@@ -34,10 +34,19 @@ def main() -> int:
     parser.add_argument("--scene", type=Path, default=Path(MICRODUCK_XML))
     parser.add_argument("--cases-per-band", type=int, default=4)
     parser.add_argument("--seed", type=int, default=66)
+    parser.add_argument("--bands", default=None, help="comma-separated: 5-15,15-30,30-60,60-90")
     parser.add_argument("--json", type=Path, default=None)
     args = parser.parse_args()
     if args.cases_per_band <= 0:
         raise SystemExit("cases-per-band must be positive")
+    selected_bands = BANDS
+    if args.bands:
+        requested = {part.strip() for part in args.bands.split(",")}
+        selected_bands = tuple(
+            (low, high) for low, high in BANDS if f"{int(low)}-{int(high)}" in requested
+        )
+        if len(selected_bands) != len(requested):
+            raise SystemExit(f"unknown bands: {args.bands}")
     replay = StandupReplay(
         policy_path=args.policy,
         scene_path=args.scene,
@@ -52,7 +61,7 @@ def main() -> int:
     )
     rng = np.random.default_rng(args.seed)
     payload_bands = {}
-    for low, high in BANDS:
+    for low, high in selected_bands:
         results = []
         for family in ["face_down", "face_up", "side"]:
             for index in range(args.cases_per_band):

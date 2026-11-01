@@ -1795,6 +1795,18 @@ def make_microduck_v66_standup_env_cfg(
     return cfg
 
 
+def make_microduck_v67_standup_env_cfg(
+    play: bool = False,
+    rough: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """v6.7: hold the 5–15° stage until measured acceptance allows promotion."""
+    cfg = make_microduck_v66_standup_env_cfg(play=play, rough=rough)
+    cfg.curriculum["ground_state_mix"].params["param_stages"] = deepcopy(
+        V66_GROUND_STATE_STAGES[:1]
+    )
+    return cfg
+
+
 # ── RL runner config ──────────────────────────────────────────────────────────
 
 MicroduckStandUpRlCfg = RslRlOnPolicyRunnerCfg(
@@ -1867,3 +1879,7 @@ MicroduckV65StandUpRlCfg.run_name = "v6.5-StandUp"
 MicroduckV66StandUpRlCfg = deepcopy(MicroduckV65StandUpRlCfg)
 MicroduckV66StandUpRlCfg.experiment_name = "v6.6-StandUp"
 MicroduckV66StandUpRlCfg.run_name = "v6.6-StandUp"
+
+MicroduckV67StandUpRlCfg = deepcopy(MicroduckV66StandUpRlCfg)
+MicroduckV67StandUpRlCfg.experiment_name = "v6.7-StandUp"
+MicroduckV67StandUpRlCfg.run_name = "v6.7-StandUp"
