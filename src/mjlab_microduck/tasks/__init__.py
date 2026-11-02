@@ -31,6 +31,10 @@ from .microduck_stand_env_cfg import (
     make_microduck_v4_stand_env_cfg,
     MicroduckV4StandRlCfg,
 )
+from .microduck_roll_env_cfg import (
+    make_microduck_v68_roll_env_cfg,
+    MicroduckV68RollRlCfg,
+)
 from .microduck_standup_env_cfg import (
     make_microduck_standup_env_cfg,
     make_microduck_v6_standup_env_cfg,
@@ -143,6 +147,15 @@ register_mjlab_task(
     env_cfg=make_microduck_velstand_env_cfg(rough=True),
     play_env_cfg=make_microduck_velstand_env_cfg(play=True, rough=True),
     rl_cfg=MicroduckVelStandRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# v6.8-FaceUpStand — learn the isolated face-up to strict-standing skill.
+register_mjlab_task(
+    task_id="v6.8-FaceUpStand",
+    env_cfg=make_microduck_v68_roll_env_cfg(),
+    play_env_cfg=make_microduck_v68_roll_env_cfg(play=True),
+    rl_cfg=MicroduckV68RollRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
