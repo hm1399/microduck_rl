@@ -49,3 +49,20 @@ MicroduckV69RollRlCfg = deepcopy(MicroduckV68RollRlCfg)
 MicroduckV69RollRlCfg.experiment_name = "v6.9-FaceUpStand"
 MicroduckV69RollRlCfg.run_name = "v6.9-FaceUpStand"
 MicroduckV69RollRlCfg.max_iterations = 250
+
+
+def make_microduck_v610_roll_env_cfg(play: bool = False, rough: bool = False) -> ManagerBasedRlEnvCfg:
+    """v6.10: a short 5–15° increment from the verified v6.9 early base."""
+    cfg = make_microduck_v69_roll_env_cfg(play=play, rough=rough)
+    cfg.events["set_ground_state"].params.update({"tilt_min_deg": 5.0, "tilt_max_deg": 15.0})
+    cfg.curriculum["ground_state_mix"].params["param_stages"][0]["params"].update(
+        {"tilt_min_deg": 5.0, "tilt_max_deg": 15.0}
+    )
+    return cfg
+
+
+MicroduckV610RollRlCfg = deepcopy(MicroduckV69RollRlCfg)
+MicroduckV610RollRlCfg.experiment_name = "v6.10-FaceUpStand"
+MicroduckV610RollRlCfg.run_name = "v6.10-FaceUpStand"
+MicroduckV610RollRlCfg.max_iterations = 50
+MicroduckV610RollRlCfg.save_interval = 50

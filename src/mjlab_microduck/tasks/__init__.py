@@ -34,8 +34,10 @@ from .microduck_stand_env_cfg import (
 from .microduck_roll_env_cfg import (
     make_microduck_v68_roll_env_cfg,
     make_microduck_v69_roll_env_cfg,
+    make_microduck_v610_roll_env_cfg,
     MicroduckV68RollRlCfg,
     MicroduckV69RollRlCfg,
+    MicroduckV610RollRlCfg,
 )
 from .microduck_standup_env_cfg import (
     make_microduck_standup_env_cfg,
@@ -166,6 +168,14 @@ register_mjlab_task(
     env_cfg=make_microduck_v69_roll_env_cfg(),
     play_env_cfg=make_microduck_v69_roll_env_cfg(play=True),
     rl_cfg=MicroduckV69RollRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="v6.10-FaceUpStand",
+    env_cfg=make_microduck_v610_roll_env_cfg(),
+    play_env_cfg=make_microduck_v610_roll_env_cfg(play=True),
+    rl_cfg=MicroduckV610RollRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
