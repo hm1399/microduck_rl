@@ -33,3 +33,19 @@ MicroduckV68RollRlCfg = deepcopy(MicroduckV67StandUpRlCfg)
 MicroduckV68RollRlCfg.experiment_name = "v6.8-FaceUpStand"
 MicroduckV68RollRlCfg.run_name = "v6.8-FaceUpStand"
 MicroduckV68RollRlCfg.max_iterations = 250
+
+
+def make_microduck_v69_roll_env_cfg(play: bool = False, rough: bool = False) -> ManagerBasedRlEnvCfg:
+    """v6.9: hold the face-up 3–5° gate until recovery and action checks pass."""
+    cfg = make_microduck_v68_roll_env_cfg(play=play, rough=rough)
+    cfg.events["set_ground_state"].params.update({"tilt_min_deg": 3.0, "tilt_max_deg": 5.0})
+    cfg.curriculum["ground_state_mix"].params["param_stages"][0]["params"].update(
+        {"tilt_min_deg": 3.0, "tilt_max_deg": 5.0}
+    )
+    return cfg
+
+
+MicroduckV69RollRlCfg = deepcopy(MicroduckV68RollRlCfg)
+MicroduckV69RollRlCfg.experiment_name = "v6.9-FaceUpStand"
+MicroduckV69RollRlCfg.run_name = "v6.9-FaceUpStand"
+MicroduckV69RollRlCfg.max_iterations = 250

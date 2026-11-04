@@ -13,7 +13,7 @@ from validate_ground_recovery_replay import run_case
 from validate_standup_replay import MICRODUCK_XML, StandupReplay
 
 
-BANDS = ((5.0, 15.0), (15.0, 30.0), (30.0, 60.0), (60.0, 90.0))
+BANDS = ((3.0, 5.0), (5.0, 15.0), (15.0, 30.0), (30.0, 60.0), (60.0, 90.0))
 
 
 def quat_yaw_tilt(yaw: float, tilt_deg: float, family: str, sign: float = 1.0) -> tuple[float, float, float, float]:
